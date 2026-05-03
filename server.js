@@ -81,12 +81,14 @@ const userRoutes = require('./api/user');
 const withdrawalRoutes = require('./api/withdrawal');
 const configRoutes = require('./api/config');
 const adminRoutes = require('./api/admin');
+const activityRoutes = require('./api/activity');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/withdraw', withdrawalRoutes);
 app.use('/api/config', configRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/activity', activityRoutes);
 
 // ═══════════════════════════════════════════════════
 // BACKWARD-COMPATIBLE ALIASES

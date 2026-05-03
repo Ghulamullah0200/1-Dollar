@@ -485,16 +485,16 @@ router.post('/update-credentials', adminAuth, asyncHandler(async (req, res) => {
 }));
 
 // ═══════════════════════════════════════════════════
-// REFERRAL LEADERBOARD
+// REFERRAL RANKING / LEADERBOARD
 // ═══════════════════════════════════════════════════
-router.get('/referral-leaderboard', adminAuth, asyncHandler(async (req, res) => {
-    const leaderboard = await User.find({ status: { $ne: 'admin' }, referralCount: { $gt: 0 } })
-        .select('username referralCount wallet.referralEarnings createdAt flaggedForFraud')
-        .sort({ referralCount: -1 })
-        .limit(50)
+router.get('/referral-ranking', adminAuth, asyncHandler(async (req, res) => {
+    const ranking = await User.find({ status: { $ne: 'admin' } })
+        .select('username referralCount grandReferralCount wallet.referralEarnings createdAt')
+        .sort({ referralCount: -1, grandReferralCount: -1 })
+        .limit(100)
         .lean();
 
-    res.json({ leaderboard });
+    res.json({ ranking });
 }));
 
 // ═══════════════════════════════════════════════════
@@ -521,4 +521,80 @@ router.get('/audit-logs', adminAuth, asyncHandler(async (req, res) => {
     });
 }));
 
+// ═══════════════════════════════════════════════════
+// FRAUD DETECTION
+// ═══════════════════════════════════════════════════
+router.get('/fraud/duplicate-ips', adminAuth, asyncHandler(async (req, res) => {
+    const duplicates = await User.aggregate([
+        { $match: { status: { $ne: 'admin' }, lastIp: { $exists: true, $ne: null } } },
+        {
+            $group: {
+                _id: "$lastIp",
+                count: { $sum: 1 },
+                users: { $push: { _id: "$_id", username: "$username", status: "$status", wallet: "$wallet" } }
+            }
+        },
+        { $match: { count: { $gt: 1 } } },
+        { $sort: { count: -1 } }
+    ]);
+
+    res.json({ duplicates });
+}));
+
+router.post('/fraud/bulk-action', adminAuth, asyncHandler(async (req, res) => {
+    const { ip, action } = req.body;
+    if (!ip || !['suspend', 'ban', 'flag'].includes(action)) {
+        return res.status(400).json({ message: 'Invalid IP or action' });
+    }
+
+    let update = {};
+    if (action === 'suspend') update = { status: 'suspended' };
+    else if (action === 'ban') update = { status: 'banned' };
+    else if (action === 'flag') update = { flaggedForFraud: true };
+
+    const result = await User.updateMany(
+        { lastIp: ip, status: { $ne: 'admin' } },
+        { $set: update }
+    );
+
+    logger.warn('FRAUD', `Bulk ${action} performed on IP ${ip} | Affected: ${result.modifiedCount} accounts`);
+    res.json({ message: `Bulk ${action} successful`, affected: result.modifiedCount });
+}));
+
+// ═══════════════════════════════════════════════════
+// APP VERSIONING
+// ═══════════════════════════════════════════════════
+router.post('/app-version', adminAuth, asyncHandler(async (req, res) => {
+    const { latestVersion, apkUrl, forceUpdate, releaseNotes, minSupportedVersion } = req.body;
+
+    if (!latestVersion || !apkUrl) {
+        return res.status(400).json({ message: 'Version and URL are required' });
+    }
+
+    // Deactivate previous versions
+    await AppVersion.updateMany({}, { $set: { isActive: false } });
+
+    const newVersion = new AppVersion({
+        latestVersion,
+        apkUrl,
+        forceUpdate: !!forceUpdate,
+        releaseNotes,
+        minSupportedVersion: minSupportedVersion || '1.0.0',
+        isActive: true,
+        publishedAt: new Date(),
+        publishedBy: req.userId
+    });
+
+    await newVersion.save();
+
+    // Notify users about new update if force update
+    if (forceUpdate) {
+        req.io.emit('app:update', { version: latestVersion, force: true });
+    }
+
+    logger.info('SYSTEM', `New app version published: v${latestVersion}`);
+    res.json({ message: 'New version published successfully', version: newVersion });
+}));
+
 module.exports = router;
+

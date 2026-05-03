@@ -30,7 +30,11 @@ router.post('/register', asyncHandler(async (req, res) => {
     // Find referrer if referral code provided
     let referrer = null;
     if (referralCode) {
-        referrer = await User.findOne({ referralCode: referralCode.toUpperCase(), status: { $ne: 'banned' } });
+        // Case-insensitive search for referral code (1dollar.username.random)
+        referrer = await User.findOne({
+            referralCode: { $regex: new RegExp(`^${referralCode}$`, "i") },
+            status: { $ne: 'banned' }
+        });
         if (!referrer) {
             return res.status(400).json({ message: 'Invalid referral code' });
         }
@@ -46,7 +50,7 @@ router.post('/register', asyncHandler(async (req, res) => {
     });
     await user.save();
 
-    // Generate and set referral code
+    // Generate and set referral code (1dollar.username.random)
     user.referralCode = user.generateReferralCode();
     await user.save();
 
@@ -62,12 +66,12 @@ router.post('/register', asyncHandler(async (req, res) => {
         type: 'signup_bonus',
         amount: SIGNUP_BONUS,
         status: 'completed',
-        description: `Signup bonus of $${SIGNUP_BONUS.toFixed(2)}`
+        description: `🚀 Account created! Received $${SIGNUP_BONUS.toFixed(2)} signup bonus.`
     }).save();
 
-    // ═══ REFERRAL BONUS TO REFERRER ═══
+    // ═══ REFERRAL BONUS TO REFERRERS (Multi-level tracking) ═══
     if (referrer) {
-        // Anti-fraud: check if same IP already referred
+        // Anti-fraud check
         const sameIpReferrals = await User.countDocuments({
             referredBy: referrer._id,
             ipAddress: user.ipAddress,
@@ -75,39 +79,44 @@ router.post('/register', asyncHandler(async (req, res) => {
         });
 
         if (sameIpReferrals >= 3) {
-            // Flag for fraud but still allow signup
             user.flaggedForFraud = true;
-            user.fraudReason = `Multiple accounts from same IP (${sameIpReferrals + 1} accounts)`;
+            user.fraudReason = `Duplicate IP registration (${sameIpReferrals + 1} users on same IP)`;
             await user.save();
-            logger.warn('FRAUD', `User ${username} flagged — same IP as ${sameIpReferrals} other referrals of ${referrer.username}`);
         } else {
-            // Credit referral bonus
+            // 1. Give bonus and increment Direct Referral count for Parent
             referrer.wallet.balance += REFERRAL_BONUS;
             referrer.wallet.totalEarned += REFERRAL_BONUS;
             referrer.wallet.referralEarnings += REFERRAL_BONUS;
             referrer.referralCount += 1;
             await referrer.save();
 
-            // Create referral bonus transaction
+            // 2. Track Grand-child for Grand-parent (if exists)
+            if (referrer.referredBy) {
+                const grandParent = await User.findById(referrer.referredBy);
+                if (grandParent) {
+                    grandParent.grandReferralCount = (grandParent.grandReferralCount || 0) + 1;
+                    await grandParent.save();
+                }
+            }
+
+            // Create referral bonus transaction for parent
             await new Transaction({
                 userId: referrer._id,
                 type: 'referral_bonus',
                 amount: REFERRAL_BONUS,
                 status: 'completed',
                 referredUserId: user._id,
-                description: `Referral bonus — ${username} signed up using your link`
+                description: `🤝 Referral bonus! ${username} joined your team.`
             }).save();
 
-            // Notify referrer via socket
+            // Notify referrer
             if (req.io) {
                 req.io.emit(`notification:${referrer._id}`, {
-                    title: '🎉 New Referral!',
-                    body: `${username} signed up using your referral link! You earned $${REFERRAL_BONUS.toFixed(2)}`,
+                    title: '🤝 New Team Member!',
+                    body: `${username} joined using your link! You earned $${REFERRAL_BONUS.toFixed(2)}`,
                     type: 'referral'
                 });
             }
-
-            logger.info('REFERRAL', `${referrer.username} earned $${REFERRAL_BONUS} from ${username}'s signup`);
         }
     }
 

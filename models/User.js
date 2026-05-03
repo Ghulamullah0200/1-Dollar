@@ -8,7 +8,8 @@ const userSchema = new mongoose.Schema({
     // ═══ REFERRAL SYSTEM ═══
     referralCode: { type: String, unique: true, sparse: true, index: true },
     referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
-    referralCount: { type: Number, default: 0, index: true },
+    referralCount: { type: Number, default: 0, index: true }, // Direct children
+    grandReferralCount: { type: Number, default: 0 }, // Grandchildren
     // ═══ WALLET ═══
     wallet: {
         balance: { type: Number, default: 0 },
@@ -50,10 +51,10 @@ userSchema.methods.comparePassword = function (password) {
     return bcrypt.compare(password, this.password);
 };
 
-// Generate referral code from user ID
+// Generate referral code in pattern: 1dollar.username.random
 userSchema.methods.generateReferralCode = function () {
-    const crypto = require('crypto');
-    return crypto.createHash('sha256').update(this._id.toString()).digest('hex').substring(0, 8).toUpperCase();
+    const random = Math.floor(1000 + Math.random() * 9000);
+    return `1dollar.${this.username.toLowerCase()}.${random}`;
 };
 
 module.exports = mongoose.model('User', userSchema);
