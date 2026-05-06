@@ -763,7 +763,7 @@ router.post('/settings', adminAuth, asyncHandler(async (req, res) => {
 // PUBLIC RANKING (no auth needed)
 // ═══════════════════════════════════════════════════
 router.get('/public-ranking', asyncHandler(async (req, res) => {
-    const ranking = await User.find({ status: { $ne: 'admin' } })
+    const ranking = await User.find({ status: { $ne: 'admin' }, depositStatus: 'verified' })
         .select('username referralCount')
         .sort({ referralCount: -1 })
         .limit(100)
