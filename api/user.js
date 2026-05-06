@@ -3,6 +3,7 @@ const router = express.Router();
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const Notification = require('../models/Notification');
+const Settings = require('../models/Settings');
 const { auth } = require('../middleware/auth');
 const { asyncHandler, paginationMeta } = require('../utils/helpers');
 
@@ -11,13 +12,18 @@ const { asyncHandler, paginationMeta } = require('../utils/helpers');
 // ═══════════════════════════════════════════════════
 router.get('/status', auth, asyncHandler(async (req, res) => {
     const user = await User.findById(req.userId);
+    const settings = await Settings.getSettings();
+
     const referrals = await User.find({ referredBy: req.userId })
-        .select('username createdAt')
+        .select('username createdAt depositStatus')
         .sort({ createdAt: -1 })
-        .limit(20)
+        .limit(50)
         .lean();
 
-    const MIN_WITHDRAWAL = parseFloat(process.env.MIN_WITHDRAWAL) || 1.00;
+    // Count only verified referrals for reward eligibility
+    const verifiedReferralCount = referrals.filter(r => r.depositStatus === 'verified').length;
+
+    const MIN_WITHDRAWAL = settings.minWithdrawal;
 
     res.json({
         wallet: user.wallet,
@@ -26,10 +32,25 @@ router.get('/status', auth, asyncHandler(async (req, res) => {
         email: user.email,
         referralCode: user.referralCode,
         referralCount: user.referralCount,
-        referrals,
+        verifiedReferralCount,
+        referrals: referrals.map(r => ({
+            username: r.username,
+            createdAt: r.createdAt,
+            depositStatus: r.depositStatus || 'none',
+        })),
         withdrawalEligible: user.wallet.balance >= MIN_WITHDRAWAL,
         minWithdrawal: MIN_WITHDRAWAL,
         accountDetails: user.accountDetails,
+        depositStatus: user.depositStatus,
+        // Dynamic settings for client
+        settings: {
+            depositAmount: settings.depositAmount,
+            signupBonus: settings.signupBonus,
+            referralBonus: settings.referralBonus,
+            minWithdrawal: settings.minWithdrawal,
+            payPerRefer: settings.payPerRefer,
+            referralsPerPayout: settings.referralsPerPayout,
+        }
     });
 }));
 

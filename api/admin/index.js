@@ -5,6 +5,7 @@ const User = require('../../models/User');
 const Transaction = require('../../models/Transaction');
 const Notification = require('../../models/Notification');
 const AuditLog = require('../../models/AuditLog');
+const Settings = require('../../models/Settings');
 const { adminAuth } = require('../../middleware/auth');
 const { asyncHandler, paginationMeta } = require('../../utils/helpers');
 const logger = require('../../utils/logger');
@@ -596,5 +597,194 @@ router.post('/app-version', adminAuth, asyncHandler(async (req, res) => {
     res.json({ message: 'New version published successfully', version: newVersion });
 }));
 
-module.exports = router;
+// ═══════════════════════════════════════════════════
+// DEPOSIT MANAGEMENT
+// ═══════════════════════════════════════════════════
+router.get('/deposits', adminAuth, asyncHandler(async (req, res) => {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const skip = (page - 1) * limit;
+    const status = req.query.status || 'pending';
 
+    let query = { depositStatus: status };
+    if (status === 'all') delete query.depositStatus;
+
+    const [users, total] = await Promise.all([
+        User.find({ ...query, status: { $ne: 'admin' } })
+            .select('username email depositStatus depositAmount depositProof depositSubmittedAt depositRejectionReason referredBy createdAt')
+            .populate('referredBy', 'username')
+            .sort({ depositSubmittedAt: -1 })
+            .skip(skip)
+            .limit(limit)
+            .lean(),
+        User.countDocuments({ ...query, status: { $ne: 'admin' } })
+    ]);
+
+    res.json({ deposits: users, pagination: paginationMeta(page, limit, total) });
+}));
+
+router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res) => {
+    const user = await User.findById(req.params.userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (user.depositStatus === 'verified') return res.status(400).json({ message: 'Already verified' });
+
+    const settings = await Settings.getSettings();
+
+    user.depositStatus = 'verified';
+    user.depositVerifiedAt = new Date();
+    user.depositVerifiedBy = req.userId;
+    user.depositRejectionReason = '';
+    await user.save();
+
+    // Update deposit transaction to completed
+    await Transaction.updateOne(
+        { userId: user._id, type: 'deposit', status: 'pending' },
+        { status: 'completed', processedBy: req.userId, processedAt: new Date() }
+    );
+
+    // ═══ NOW GIVE REFERRAL BONUS TO REFERRER ═══
+    if (user.referredBy) {
+        const referrer = await User.findById(user.referredBy);
+        if (referrer && !user.flaggedForFraud) {
+            const REFERRAL_BONUS = settings.referralBonus;
+
+            referrer.wallet.balance += REFERRAL_BONUS;
+            referrer.wallet.totalEarned += REFERRAL_BONUS;
+            referrer.wallet.referralEarnings += REFERRAL_BONUS;
+            await referrer.save();
+
+            // Create referral bonus transaction
+            await new Transaction({
+                userId: referrer._id,
+                type: 'referral_bonus',
+                amount: REFERRAL_BONUS,
+                status: 'completed',
+                referredUserId: user._id,
+                description: `🤝 Referral bonus! ${user.username}'s deposit verified. You earned $${REFERRAL_BONUS.toFixed(2)}`
+            }).save();
+
+            // Notify referrer
+            const notifTitle = '💰 Referral Bonus Earned!';
+            const notifBody = `${user.username}'s deposit was verified! You earned $${REFERRAL_BONUS.toFixed(2)}`;
+
+            await new Notification({
+                title: notifTitle,
+                body: notifBody,
+                type: 'referral',
+                targetUserId: referrer._id,
+                sentBy: req.userId,
+            }).save();
+
+            if (req.io) {
+                req.io.emit(`notification:${referrer._id}`, { title: notifTitle, body: notifBody, type: 'referral' });
+            }
+            fcmService.sendToUser(referrer._id, notifTitle, notifBody, { type: 'referral' }).catch(() => { });
+        }
+    }
+
+    // Notify user
+    const userNotifTitle = '✅ Deposit Verified!';
+    const userNotifBody = 'Your deposit has been verified. You now have full access to all features!';
+    await new Notification({
+        title: userNotifTitle,
+        body: userNotifBody,
+        type: 'deposit',
+        targetUserId: user._id,
+        sentBy: req.userId,
+    }).save();
+
+    if (req.io) {
+        req.io.emit(`notification:${user._id}`, { title: userNotifTitle, body: userNotifBody, type: 'deposit' });
+    }
+    fcmService.sendToUser(user._id, userNotifTitle, userNotifBody, { type: 'deposit' }).catch(() => { });
+
+    logger.info('ADMIN', `Deposit verified for user ${user.username}`);
+    res.json({ message: `Deposit verified for ${user.username}` });
+}));
+
+router.post('/deposits/:userId/reject', adminAuth, asyncHandler(async (req, res) => {
+    const { reason } = req.body;
+    const user = await User.findById(req.params.userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    user.depositStatus = 'rejected';
+    user.depositRejectionReason = reason || 'Deposit rejected by admin';
+    await user.save();
+
+    await Transaction.updateOne(
+        { userId: user._id, type: 'deposit', status: 'pending' },
+        { status: 'rejected', processedBy: req.userId, processedAt: new Date() }
+    );
+
+    // Notify user
+    const notifTitle = '❌ Deposit Rejected';
+    const notifBody = `Your deposit was rejected: ${user.depositRejectionReason}. Please resubmit.`;
+    await new Notification({
+        title: notifTitle,
+        body: notifBody,
+        type: 'deposit',
+        targetUserId: user._id,
+        sentBy: req.userId,
+    }).save();
+
+    if (req.io) {
+        req.io.emit(`notification:${user._id}`, { title: notifTitle, body: notifBody, type: 'deposit' });
+    }
+
+    logger.info('ADMIN', `Deposit rejected for user ${user.username}: ${user.depositRejectionReason}`);
+    res.json({ message: `Deposit rejected for ${user.username}` });
+}));
+
+// ═══════════════════════════════════════════════════
+// DYNAMIC SETTINGS MANAGEMENT
+// ═══════════════════════════════════════════════════
+router.get('/settings', adminAuth, asyncHandler(async (req, res) => {
+    const settings = await Settings.getSettings();
+    res.json(settings);
+}));
+
+router.post('/settings', adminAuth, asyncHandler(async (req, res) => {
+    const { depositAmount, signupBonus, referralBonus, minWithdrawal, payPerRefer, referralsPerPayout } = req.body;
+
+    const updates = {};
+    if (depositAmount !== undefined) updates.depositAmount = parseFloat(depositAmount);
+    if (signupBonus !== undefined) updates.signupBonus = parseFloat(signupBonus);
+    if (referralBonus !== undefined) updates.referralBonus = parseFloat(referralBonus);
+    if (minWithdrawal !== undefined) updates.minWithdrawal = parseFloat(minWithdrawal);
+    if (payPerRefer !== undefined) updates.payPerRefer = parseFloat(payPerRefer);
+    if (referralsPerPayout !== undefined) updates.referralsPerPayout = parseInt(referralsPerPayout);
+
+    const settings = await Settings.updateSettings(updates, req.userId);
+    logger.info('ADMIN', `Settings updated: ${JSON.stringify(updates)}`);
+    res.json({ message: 'Settings updated successfully', settings });
+}));
+
+// ═══════════════════════════════════════════════════
+// PUBLIC RANKING (no auth needed)
+// ═══════════════════════════════════════════════════
+router.get('/public-ranking', asyncHandler(async (req, res) => {
+    const ranking = await User.find({ status: { $ne: 'admin' } })
+        .select('username referralCount')
+        .sort({ referralCount: -1 })
+        .limit(100)
+        .lean();
+
+    res.json({ ranking });
+}));
+
+// ═══════════════════════════════════════════════════
+// PUBLIC SETTINGS (for client)
+// ═══════════════════════════════════════════════════
+router.get('/public-settings', asyncHandler(async (req, res) => {
+    const settings = await Settings.getSettings();
+    res.json({
+        depositAmount: settings.depositAmount,
+        signupBonus: settings.signupBonus,
+        referralBonus: settings.referralBonus,
+        minWithdrawal: settings.minWithdrawal,
+        payPerRefer: settings.payPerRefer,
+        referralsPerPayout: settings.referralsPerPayout,
+    });
+}));
+
+module.exports = router;

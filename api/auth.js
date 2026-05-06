@@ -3,12 +3,10 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
+const Settings = require('../models/Settings');
 const { auth } = require('../middleware/auth');
 const { asyncHandler } = require('../utils/helpers');
 const logger = require('../utils/logger');
-
-const SIGNUP_BONUS = parseFloat(process.env.SIGNUP_BONUS) || 0.10;
-const REFERRAL_BONUS = parseFloat(process.env.REFERRAL_BONUS) || 0.50;
 
 // ═══════════════════════════════════════════════════
 // REGISTER (with optional referral code)
@@ -18,6 +16,10 @@ router.post('/register', asyncHandler(async (req, res) => {
     if (!username || !email || !password) {
         return res.status(400).json({ message: 'All fields are required' });
     }
+
+    // Get dynamic settings
+    const settings = await Settings.getSettings();
+    const SIGNUP_BONUS = settings.signupBonus;
 
     // Check existing
     const existing = await User.findOne({ $or: [{ username }, { email }] });
@@ -69,7 +71,7 @@ router.post('/register', asyncHandler(async (req, res) => {
         description: `🚀 Account created! Received $${SIGNUP_BONUS.toFixed(2)} signup bonus.`
     }).save();
 
-    // ═══ REFERRAL BONUS TO REFERRERS (Multi-level tracking) ═══
+    // ═══ REFERRAL TRACKING (bonus deferred until deposit verified) ═══
     if (referrer) {
         // Anti-fraud check
         const sameIpReferrals = await User.countDocuments({
@@ -83,14 +85,12 @@ router.post('/register', asyncHandler(async (req, res) => {
             user.fraudReason = `Duplicate IP registration (${sameIpReferrals + 1} users on same IP)`;
             await user.save();
         } else {
-            // 1. Give bonus and increment Direct Referral count for Parent
-            referrer.wallet.balance += REFERRAL_BONUS;
-            referrer.wallet.totalEarned += REFERRAL_BONUS;
-            referrer.wallet.referralEarnings += REFERRAL_BONUS;
+            // Track the referral count but DO NOT give bonus yet
+            // Bonus is given when the referred user's deposit is verified
             referrer.referralCount += 1;
             await referrer.save();
 
-            // 2. Track Grand-child for Grand-parent (if exists)
+            // Track Grand-child for Grand-parent (if exists)
             if (referrer.referredBy) {
                 const grandParent = await User.findById(referrer.referredBy);
                 if (grandParent) {
@@ -99,21 +99,11 @@ router.post('/register', asyncHandler(async (req, res) => {
                 }
             }
 
-            // Create referral bonus transaction for parent
-            await new Transaction({
-                userId: referrer._id,
-                type: 'referral_bonus',
-                amount: REFERRAL_BONUS,
-                status: 'completed',
-                referredUserId: user._id,
-                description: `🤝 Referral bonus! ${username} joined your team.`
-            }).save();
-
-            // Notify referrer
+            // Notify referrer (deposit pending)
             if (req.io) {
                 req.io.emit(`notification:${referrer._id}`, {
-                    title: '🤝 New Team Member!',
-                    body: `${username} joined using your link! You earned $${REFERRAL_BONUS.toFixed(2)}`,
+                    title: '👤 New Referral Signup!',
+                    body: `${username} registered using your link! They need to complete deposit for you to earn.`,
                     type: 'referral'
                 });
             }
@@ -147,6 +137,7 @@ router.post('/register', asyncHandler(async (req, res) => {
             status: user.status,
             referralCode: user.referralCode,
             referralCount: user.referralCount,
+            depositStatus: user.depositStatus,
         }
     });
 }));
@@ -180,6 +171,7 @@ router.post('/login', asyncHandler(async (req, res) => {
             status: user.status,
             referralCode: user.referralCode,
             referralCount: user.referralCount,
+            depositStatus: user.depositStatus,
         }
     });
 }));

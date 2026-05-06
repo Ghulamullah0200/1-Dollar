@@ -35,6 +35,19 @@ const userSchema = new mongoose.Schema({
     deviceFingerprint: { type: String, default: '' },
     flaggedForFraud: { type: Boolean, default: false, index: true },
     fraudReason: { type: String, default: '' },
+    // ═══ DEPOSIT VERIFICATION ═══
+    depositStatus: {
+        type: String,
+        enum: ['none', 'pending', 'verified', 'rejected'],
+        default: 'none',
+        index: true
+    },
+    depositAmount: { type: Number, default: 0 },
+    depositProof: { type: String, default: '' }, // base64 or URL of payment screenshot
+    depositSubmittedAt: { type: Date, default: null },
+    depositVerifiedAt: { type: Date, default: null },
+    depositVerifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    depositRejectionReason: { type: String, default: '' },
     // ═══ PUSH NOTIFICATIONS (FCM) ═══
     fcmToken: { type: String, default: null, index: true },
     lastActiveAt: { type: Date, default: null },

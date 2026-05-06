@@ -2,10 +2,9 @@ const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
+const Settings = require('../models/Settings');
 const { auth } = require('../middleware/auth');
 const { asyncHandler } = require('../utils/helpers');
-
-const MIN_WITHDRAWAL = parseFloat(process.env.MIN_WITHDRAWAL) || 1.00;
 
 // ═══════════════════════════════════════════════════
 // REQUEST WITHDRAWAL
@@ -13,6 +12,9 @@ const MIN_WITHDRAWAL = parseFloat(process.env.MIN_WITHDRAWAL) || 1.00;
 router.post('/', auth, asyncHandler(async (req, res) => {
     const { amount, accountDetails } = req.body;
     const withdrawAmount = parseFloat(amount);
+
+    const settings = await Settings.getSettings();
+    const MIN_WITHDRAWAL = settings.minWithdrawal;
 
     if (!withdrawAmount || withdrawAmount <= 0) {
         return res.status(400).json({ message: 'Invalid withdrawal amount' });
@@ -23,6 +25,12 @@ router.post('/', auth, asyncHandler(async (req, res) => {
     }
 
     const userCheck = await User.findById(req.userId);
+
+    // Check deposit verification
+    if (userCheck.depositStatus !== 'verified') {
+        return res.status(403).json({ message: 'Your deposit must be verified before you can withdraw. Please complete the deposit first.' });
+    }
+
     if (userCheck.status === 'banned') {
         return res.status(403).json({ message: 'Account banned. No further actions allowed.' });
     }
@@ -87,12 +95,17 @@ router.post('/', auth, asyncHandler(async (req, res) => {
 router.post('/all', auth, asyncHandler(async (req, res) => {
     const { accountDetails } = req.body;
     const user = await User.findById(req.userId);
+    const settings = await Settings.getSettings();
+    const MIN_WITHDRAWAL = settings.minWithdrawal;
 
     if (!user || user.wallet.balance <= 0) {
         return res.status(400).json({ message: 'No balance to withdraw' });
     }
     if (user.wallet.balance < MIN_WITHDRAWAL) {
         return res.status(400).json({ message: `Minimum withdrawal is $${MIN_WITHDRAWAL.toFixed(2)}` });
+    }
+    if (user.depositStatus !== 'verified') {
+        return res.status(403).json({ message: 'Your deposit must be verified before you can withdraw.' });
     }
     if (user.status === 'banned') {
         return res.status(403).json({ message: 'Account banned. No further actions allowed.' });
