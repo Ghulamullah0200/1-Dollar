@@ -3,6 +3,13 @@ const mongoose = require('mongoose');
 const settingsSchema = new mongoose.Schema({
     // ═══ DEPOSIT SETTINGS ═══
     depositAmount: { type: Number, default: 1.00 },
+    bankDetails: {
+        accountTitle: { type: String, default: 'Admin' },
+        accountNumber: { type: String, default: '1234567890' },
+        bankName: { type: String, default: 'EasyPaisa' },
+        additionalInstructions: { type: String, default: 'Please send exact amount' },
+        isActive: { type: Boolean, default: true }
+    },
     // ═══ BONUS SETTINGS ═══
     signupBonus: { type: Number, default: 0.10 },
     referralBonus: { type: Number, default: 0.50 },

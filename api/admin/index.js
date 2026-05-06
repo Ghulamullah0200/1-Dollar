@@ -744,7 +744,7 @@ router.get('/settings', adminAuth, asyncHandler(async (req, res) => {
 }));
 
 router.post('/settings', adminAuth, asyncHandler(async (req, res) => {
-    const { depositAmount, signupBonus, referralBonus, minWithdrawal, payPerRefer, referralsPerPayout } = req.body;
+    const { depositAmount, signupBonus, referralBonus, minWithdrawal, payPerRefer, referralsPerPayout, bankDetails } = req.body;
 
     const updates = {};
     if (depositAmount !== undefined) updates.depositAmount = parseFloat(depositAmount);
@@ -753,8 +753,15 @@ router.post('/settings', adminAuth, asyncHandler(async (req, res) => {
     if (minWithdrawal !== undefined) updates.minWithdrawal = parseFloat(minWithdrawal);
     if (payPerRefer !== undefined) updates.payPerRefer = parseFloat(payPerRefer);
     if (referralsPerPayout !== undefined) updates.referralsPerPayout = parseInt(referralsPerPayout);
+    if (bankDetails !== undefined) updates.bankDetails = bankDetails;
 
     const settings = await Settings.updateSettings(updates, req.userId);
+
+    // Broadcast bank details to clients
+    if (bankDetails && req.io) {
+        req.io.emit('bankDetailsUpdated', settings.bankDetails);
+    }
+
     logger.info('ADMIN', `Settings updated: ${JSON.stringify(updates)}`);
     res.json({ message: 'Settings updated successfully', settings });
 }));

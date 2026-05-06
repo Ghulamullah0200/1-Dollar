@@ -92,6 +92,20 @@ app.use('/api/config', configRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/activity', activityRoutes);
 
+app.get('/api/bank-details', async (req, res) => {
+    try {
+        const Settings = require('./models/Settings');
+        const settings = await Settings.getSettings();
+        if (settings && settings.bankDetails) {
+            res.json(settings.bankDetails);
+        } else {
+            res.status(404).json({ message: 'Bank details not configured yet' });
+        }
+    } catch (err) {
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
 // ═══════════════════════════════════════════════════
 // BACKWARD-COMPATIBLE ALIASES
 // ═══════════════════════════════════════════════════
