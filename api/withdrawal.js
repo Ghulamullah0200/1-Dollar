@@ -5,6 +5,7 @@ const Transaction = require('../models/Transaction');
 const Settings = require('../models/Settings');
 const { auth } = require('../middleware/auth');
 const { asyncHandler } = require('../utils/helpers');
+const notificationService = require('../services/notificationService');
 
 // ═══════════════════════════════════════════════════
 // REQUEST WITHDRAWAL
@@ -86,6 +87,14 @@ router.post('/', auth, asyncHandler(async (req, res) => {
         });
     }
 
+    
+    // PUSH NOTIFICATION FOR ADMINS
+    notificationService.sendToAdmins(
+        '📤 New Withdrawal Request',
+        `${user.username} requested a $${withdrawAmount.toFixed(2)} withdrawal`,
+        { type: 'new_withdrawal', withdrawalId: withdrawal._id.toString() }
+    ).catch(() => {});
+    
     res.json({ message: 'Withdrawal request submitted!', wallet: user.wallet });
 }));
 
