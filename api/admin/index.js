@@ -642,10 +642,11 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
         { status: 'completed', processedBy: req.userId, processedAt: new Date() }
     );
 
-    // ═══ NOW GIVE REFERRAL BONUS TO REFERRER ═══
+    // ═══ REFERRAL BONUS — Only if BOTH referrer AND referred user are verified ═══
     if (user.referredBy) {
         const referrer = await User.findById(user.referredBy);
-        if (referrer && !user.flaggedForFraud) {
+        if (referrer && !user.flaggedForFraud && referrer.depositStatus === 'verified') {
+            // Both the referrer and the referred user are now deposit-verified
             const REFERRAL_BONUS = settings.referralBonus;
 
             referrer.wallet.balance += REFERRAL_BONUS;
@@ -679,6 +680,81 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
                 req.io.emit(`notification:${referrer._id}`, { title: notifTitle, body: notifBody, type: 'referral' });
             }
             fcmService.sendToUser(referrer._id, notifTitle, notifBody, { type: 'referral' }).catch(() => { });
+        } else if (referrer && !user.flaggedForFraud && referrer.depositStatus !== 'verified') {
+            // Referrer is not yet verified — notify them they need to deposit first
+            const pendingTitle = '⏳ Referral Bonus Pending';
+            const pendingBody = `${user.username}'s deposit was verified, but you need to complete your own deposit first to earn the referral bonus.`;
+
+            await new Notification({
+                title: pendingTitle,
+                body: pendingBody,
+                type: 'referral',
+                targetUserId: referrer._id,
+                sentBy: req.userId,
+            }).save();
+
+            if (req.io) {
+                req.io.emit(`notification:${referrer._id}`, { title: pendingTitle, body: pendingBody, type: 'referral' });
+            }
+            fcmService.sendToUser(referrer._id, pendingTitle, pendingBody, { type: 'referral' }).catch(() => { });
+
+            logger.info('REFERRAL', `Bonus deferred for ${referrer.username} — referrer not deposit-verified`);
+        }
+    }
+
+    // ═══ CHECK: Does newly verified user have referrals already verified? Pay deferred bonuses ═══
+    // When a user gets verified, check if they referred anyone whose deposit is also verified
+    // but the bonus was previously deferred because this user wasn't verified yet
+    const referredUsers = await User.find({
+        referredBy: user._id,
+        depositStatus: 'verified',
+        flaggedForFraud: { $ne: true }
+    }).lean();
+
+    for (const referredUser of referredUsers) {
+        // Check if we already paid a referral bonus for this referred user
+        const existingBonus = await Transaction.findOne({
+            userId: user._id,
+            type: 'referral_bonus',
+            referredUserId: referredUser._id,
+            status: 'completed'
+        });
+
+        if (!existingBonus) {
+            const REFERRAL_BONUS = settings.referralBonus;
+
+            await User.findByIdAndUpdate(user._id, {
+                $inc: {
+                    'wallet.balance': REFERRAL_BONUS,
+                    'wallet.totalEarned': REFERRAL_BONUS,
+                    'wallet.referralEarnings': REFERRAL_BONUS
+                }
+            });
+
+            await new Transaction({
+                userId: user._id,
+                type: 'referral_bonus',
+                amount: REFERRAL_BONUS,
+                status: 'completed',
+                referredUserId: referredUser._id,
+                description: `🤝 Deferred referral bonus! ${referredUser.username} was already verified. You earned $${REFERRAL_BONUS.toFixed(2)}`
+            }).save();
+
+            const deferredTitle = '💰 Referral Bonus Unlocked!';
+            const deferredBody = `Your deposit is verified! You earned $${REFERRAL_BONUS.toFixed(2)} for referring ${referredUser.username}`;
+            await new Notification({
+                title: deferredTitle,
+                body: deferredBody,
+                type: 'referral',
+                targetUserId: user._id,
+                sentBy: req.userId,
+            }).save();
+
+            if (req.io) {
+                req.io.emit(`notification:${user._id}`, { title: deferredTitle, body: deferredBody, type: 'referral' });
+            }
+
+            logger.info('REFERRAL', `Deferred bonus paid to ${user.username} for previously-verified referral ${referredUser.username}`);
         }
     }
 
@@ -793,9 +869,18 @@ router.post('/settings', adminAuth, asyncHandler(async (req, res) => {
 
     const settings = await Settings.updateSettings(updates, req.userId);
 
-    // Broadcast bank details to clients
-    if (bankDetails && req.io) {
-        req.io.emit('bankDetailsUpdated', settings.bankDetails);
+    // Broadcast updates to all connected clients
+    if (req.io) {
+        if (bankDetails) {
+            req.io.emit('bankDetailsUpdated', settings.bankDetails);
+        }
+        if (depositAmount !== undefined || depositPackages !== undefined) {
+            req.io.emit('depositAmountUpdated', { depositAmount: settings.depositAmount });
+            req.io.emit('depositSettingsUpdated', {
+                depositAmount: settings.depositAmount,
+                depositPackages: settings.depositPackages
+            });
+        }
     }
 
     logger.info('ADMIN', `Settings updated: ${JSON.stringify(updates)}`);

@@ -29,10 +29,11 @@ router.post('/', auth, asyncHandler(async (req, res) => {
     }
 
     const settings = await Settings.getSettings();
+    const amount = req.body.amount ? parseFloat(req.body.amount) : settings.depositAmount;
 
     user.depositStatus = 'pending';
     user.depositProof = proof;
-    user.depositAmount = settings.depositAmount;
+    user.depositAmount = amount;
     user.depositSubmittedAt = new Date();
     user.depositRejectionReason = '';
     await user.save();
@@ -41,29 +42,29 @@ router.post('/', auth, asyncHandler(async (req, res) => {
     await new Transaction({
         userId: user._id,
         type: 'deposit',
-        amount: settings.depositAmount,
+        amount: amount,
         status: 'pending',
-        description: `Deposit of $${settings.depositAmount.toFixed(2)} submitted for verification`
+        description: `Deposit of $${amount.toFixed(2)} submitted for verification`
     }).save();
 
     // Admin alert
     if (req.io) {
         req.io.emit('admin:newDeposit', {
             title: '💵 New Deposit Submitted',
-            body: `${user.username} submitted a $${settings.depositAmount.toFixed(2)} deposit for verification`,
+            body: `${user.username} submitted a $${amount.toFixed(2)} deposit for verification`,
             username: user.username,
             userId: user._id,
-            amount: settings.depositAmount,
+            amount: amount,
             timestamp: new Date().toISOString()
         });
     }
 
-    logger.info('DEPOSIT', `User ${user.username} submitted deposit of $${settings.depositAmount.toFixed(2)}`);
+    logger.info('DEPOSIT', `User ${user.username} submitted deposit of $${amount.toFixed(2)}`);
 
     res.json({
         message: 'Deposit submitted! Please wait for admin verification.',
         depositStatus: 'pending',
-        depositAmount: settings.depositAmount
+        depositAmount: amount
     });
 }));
 
@@ -88,10 +89,11 @@ router.post('/resubmit', auth, asyncHandler(async (req, res) => {
     }
 
     const settings = await Settings.getSettings();
+    const amount = req.body.amount ? parseFloat(req.body.amount) : (user.depositAmount || settings.depositAmount);
 
     user.depositStatus = 'pending';
     user.depositProof = proof;
-    user.depositAmount = settings.depositAmount;
+    user.depositAmount = amount;
     user.depositSubmittedAt = new Date();
     user.depositRejectionReason = '';
     await user.save();
@@ -99,9 +101,9 @@ router.post('/resubmit', auth, asyncHandler(async (req, res) => {
     await new Transaction({
         userId: user._id,
         type: 'deposit',
-        amount: settings.depositAmount,
+        amount: amount,
         status: 'pending',
-        description: `Deposit resubmitted for $${settings.depositAmount.toFixed(2)}`
+        description: `Deposit resubmitted for $${amount.toFixed(2)}`
     }).save();
 
     if (req.io) {

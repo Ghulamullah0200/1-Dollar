@@ -96,10 +96,10 @@ app.get('/api/bank-details', async (req, res) => {
     try {
         const Settings = require('./models/Settings');
         const settings = await Settings.getSettings();
-        if (settings && settings.bankDetails) {
+        if (settings && settings.bankDetails && settings.bankDetails.isActive) {
             res.json(settings.bankDetails);
         } else {
-            res.status(404).json({ message: 'Bank details not configured yet' });
+            res.status(404).json({ message: 'Bank details not configured or inactive' });
         }
     } catch (err) {
         res.status(500).json({ message: 'Internal server error' });
