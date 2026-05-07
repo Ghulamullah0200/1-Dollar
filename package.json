@@ -19,8 +19,11 @@
         "express": "^5.2.1",
         "express-rate-limit": "^8.4.1",
         "firebase-admin": "^13.8.0",
+        "gaxios": "^7.1.4",
+        "gcp-metadata": "^8.1.2",
         "jsonwebtoken": "^9.0.3",
         "mongoose": "^9.2.3",
+        "node-fetch": "^3.3.2",
         "socket.io": "^4.8.3"
     }
 }
