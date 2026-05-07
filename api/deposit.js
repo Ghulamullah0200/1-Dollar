@@ -58,7 +58,13 @@ router.post('/', auth, asyncHandler(async (req, res) => {
             timestamp: new Date().toISOString()
         });
     }
-
+     // PUSH NOTIFICATION FOR ADMINS
+    notificationService.sendToAdmins(
+        '💵 New Deposit Submitted',
+        `${user.username} submitted a $${amount.toFixed(2)} deposit for verification`,
+        { type: 'new_deposit', userId: user._id.toString() }
+    ).catch(err => logger.error('DEPOSIT_PUSH', err.message));
+    
     logger.info('DEPOSIT', `User ${user.username} submitted deposit of $${amount.toFixed(2)}`);
 
     res.json({
