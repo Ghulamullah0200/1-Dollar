@@ -842,24 +842,39 @@ router.get('/bank-details', adminAuth, asyncHandler(async (req, res) => {
 router.post('/bank-details', adminAuth, asyncHandler(async (req, res) => {
     const { accountNumber, bankName, accountTitle, additionalInstructions } = req.body;
 
-    const settings = await Settings.getSettings();
-    settings.bankDetails = {
-        accountNumber,
-        bankName,
-        accountTitle,
-        additionalInstructions,
-        isActive: true
-    };
-    settings.updatedBy = req.userId;
-    await settings.save();
+    logger.info('ADMIN', `Bank details save request: ${JSON.stringify({ accountNumber, bankName, accountTitle, additionalInstructions })}`);
+
+    // Use findOneAndUpdate with $set to guarantee atomic persistence
+    // (Object.assign / direct assignment on subdocuments can silently fail in Mongoose)
+    let settings = await Settings.findOne();
+    if (!settings) {
+        settings = await Settings.create({});
+    }
+
+    const updatedSettings = await Settings.findOneAndUpdate(
+        { _id: settings._id },
+        {
+            $set: {
+                'bankDetails.accountNumber': accountNumber,
+                'bankDetails.bankName': bankName || '',
+                'bankDetails.accountTitle': accountTitle,
+                'bankDetails.additionalInstructions': additionalInstructions || '',
+                'bankDetails.isActive': true,
+                updatedBy: req.userId
+            }
+        },
+        { new: true }
+    );
+
+    logger.info('ADMIN', `Bank details SAVED to DB. Verified: ${JSON.stringify(updatedSettings.bankDetails)}`);
 
     // Broadcast bank details to clients
     if (req.io) {
-        req.io.emit('bankDetailsUpdated', settings.bankDetails);
+        req.io.emit('bankDetailsUpdated', updatedSettings.bankDetails);
     }
 
     logger.info('ADMIN', `Bank details updated by ${req.userId}`);
-    res.json({ message: 'Bank details published successfully', bankDetails: settings.bankDetails });
+    res.json({ message: 'Bank details published successfully', bankDetails: updatedSettings.bankDetails });
 }));
 
 // ═══════════════════════════════════════════════════

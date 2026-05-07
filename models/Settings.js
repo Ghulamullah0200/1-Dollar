@@ -45,6 +45,12 @@ settingsSchema.statics.updateSettings = async function (updates, adminId) {
         settings = new this({});
     }
     Object.assign(settings, updates, { updatedBy: adminId });
+
+    // Mongoose doesn't detect changes to nested subdocs via Object.assign
+    // Explicitly mark them as modified so .save() persists them
+    if (updates.bankDetails !== undefined) settings.markModified('bankDetails');
+    if (updates.depositPackages !== undefined) settings.markModified('depositPackages');
+
     await settings.save();
     return settings;
 };
