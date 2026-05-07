@@ -3,6 +3,14 @@ const mongoose = require('mongoose');
 const settingsSchema = new mongoose.Schema({
     // ═══ DEPOSIT SETTINGS ═══
     depositAmount: { type: Number, default: 1.00 },
+    depositPackages: [
+        {
+            name: { type: String, default: 'Standard' },
+            amount: { type: Number, default: 1.00 },
+            description: { type: String, default: '1 queue slot' },
+            isActive: { type: Boolean, default: true }
+        }
+    ],
     bankDetails: {
         accountTitle: { type: String, default: 'Admin' },
         accountNumber: { type: String, default: '1234567890' },

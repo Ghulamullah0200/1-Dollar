@@ -738,16 +738,52 @@ router.post('/deposits/:userId/reject', adminAuth, asyncHandler(async (req, res)
 // ═══════════════════════════════════════════════════
 // DYNAMIC SETTINGS MANAGEMENT
 // ═══════════════════════════════════════════════════
+// BANK DETAILS MANAGEMENT
+// ═══════════════════════════════════════════════════
+router.get('/bank-details', adminAuth, asyncHandler(async (req, res) => {
+    const settings = await Settings.getSettings();
+    // Wrap in array for compatibility with admin dashboard's expectation
+    res.json([{
+        ...settings.bankDetails,
+        publishedAt: settings.updatedAt
+    }]);
+}));
+
+router.post('/bank-details', adminAuth, asyncHandler(async (req, res) => {
+    const { accountNumber, bankName, accountTitle, additionalInstructions } = req.body;
+
+    const settings = await Settings.getSettings();
+    settings.bankDetails = {
+        accountNumber,
+        bankName,
+        accountTitle,
+        additionalInstructions,
+        isActive: true
+    };
+    settings.updatedBy = req.userId;
+    await settings.save();
+
+    // Broadcast bank details to clients
+    if (req.io) {
+        req.io.emit('bankDetailsUpdated', settings.bankDetails);
+    }
+
+    logger.info('ADMIN', `Bank details updated by ${req.userId}`);
+    res.json({ message: 'Bank details published successfully', bankDetails: settings.bankDetails });
+}));
+
+// ═══════════════════════════════════════════════════
 router.get('/settings', adminAuth, asyncHandler(async (req, res) => {
     const settings = await Settings.getSettings();
     res.json(settings);
 }));
 
 router.post('/settings', adminAuth, asyncHandler(async (req, res) => {
-    const { depositAmount, signupBonus, referralBonus, minWithdrawal, payPerRefer, referralsPerPayout, bankDetails } = req.body;
+    const { depositAmount, depositPackages, signupBonus, referralBonus, minWithdrawal, payPerRefer, referralsPerPayout, bankDetails } = req.body;
 
     const updates = {};
     if (depositAmount !== undefined) updates.depositAmount = parseFloat(depositAmount);
+    if (depositPackages !== undefined) updates.depositPackages = depositPackages;
     if (signupBonus !== undefined) updates.signupBonus = parseFloat(signupBonus);
     if (referralBonus !== undefined) updates.referralBonus = parseFloat(referralBonus);
     if (minWithdrawal !== undefined) updates.minWithdrawal = parseFloat(minWithdrawal);

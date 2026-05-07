@@ -106,6 +106,19 @@ app.get('/api/bank-details', async (req, res) => {
     }
 });
 
+app.get('/api/deposit-settings', async (req, res) => {
+    try {
+        const Settings = require('./models/Settings');
+        const settings = await Settings.getSettings();
+        res.json({
+            depositAmount: settings.depositAmount,
+            depositPackages: settings.depositPackages || []
+        });
+    } catch (err) {
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
 // ═══════════════════════════════════════════════════
 // BACKWARD-COMPATIBLE ALIASES
 // ═══════════════════════════════════════════════════
