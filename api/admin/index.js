@@ -915,4 +915,27 @@ router.get('/public-settings', asyncHandler(async (req, res) => {
     });
 }));
 
+// ═══════════════════════════════════════════════════
+// PUBLIC BANK DETAILS (for client deposit page)
+// ═══════════════════════════════════════════════════
+router.get('/public-bank-details', asyncHandler(async (req, res) => {
+    const settings = await Settings.getSettings();
+    if (settings && settings.bankDetails && settings.bankDetails.isActive) {
+        res.json(settings.bankDetails);
+    } else {
+        res.status(404).json({ message: 'Bank details not configured or inactive' });
+    }
+}));
+
+// ═══════════════════════════════════════════════════
+// PUBLIC DEPOSIT SETTINGS (for client deposit page)
+// ═══════════════════════════════════════════════════
+router.get('/public-deposit-settings', asyncHandler(async (req, res) => {
+    const settings = await Settings.getSettings();
+    res.json({
+        depositAmount: settings.depositAmount,
+        depositPackages: settings.depositPackages || []
+    });
+}));
+
 module.exports = router;
