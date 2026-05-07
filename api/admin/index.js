@@ -647,39 +647,51 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
         const referrer = await User.findById(user.referredBy);
         if (referrer && !user.flaggedForFraud && referrer.depositStatus === 'verified') {
             // Both the referrer and the referred user are now deposit-verified
-            const REFERRAL_BONUS = settings.referralBonus;
-
-            referrer.wallet.balance += REFERRAL_BONUS;
-            referrer.wallet.totalEarned += REFERRAL_BONUS;
-            referrer.wallet.referralEarnings += REFERRAL_BONUS;
-            await referrer.save();
-
-            // Create referral bonus transaction
-            await new Transaction({
+            // Idempotent check — prevent duplicate reward
+            const alreadyPaid = await Transaction.findOne({
                 userId: referrer._id,
                 type: 'referral_bonus',
-                amount: REFERRAL_BONUS,
-                status: 'completed',
                 referredUserId: user._id,
-                description: `🤝 Referral bonus! ${user.username}'s deposit verified. You earned $${REFERRAL_BONUS.toFixed(2)}`
-            }).save();
+                status: 'completed'
+            });
 
-            // Notify referrer
-            const notifTitle = '💰 Referral Bonus Earned!';
-            const notifBody = `${user.username}'s deposit was verified! You earned $${REFERRAL_BONUS.toFixed(2)}`;
+            if (!alreadyPaid) {
+                const REFERRAL_BONUS = settings.referralBonus;
 
-            await new Notification({
-                title: notifTitle,
-                body: notifBody,
-                type: 'referral',
-                targetUserId: referrer._id,
-                sentBy: req.userId,
-            }).save();
+                referrer.wallet.balance += REFERRAL_BONUS;
+                referrer.wallet.totalEarned += REFERRAL_BONUS;
+                referrer.wallet.referralEarnings += REFERRAL_BONUS;
+                await referrer.save();
 
-            if (req.io) {
-                req.io.emit(`notification:${referrer._id}`, { title: notifTitle, body: notifBody, type: 'referral' });
+                // Create referral bonus transaction
+                await new Transaction({
+                    userId: referrer._id,
+                    type: 'referral_bonus',
+                    amount: REFERRAL_BONUS,
+                    status: 'completed',
+                    referredUserId: user._id,
+                    description: `🤝 Referral bonus! ${user.username}'s deposit verified. You earned $${REFERRAL_BONUS.toFixed(2)}`
+                }).save();
+
+                // Notify referrer
+                const notifTitle = '💰 Referral Bonus Earned!';
+                const notifBody = `${user.username}'s deposit was verified! You earned $${REFERRAL_BONUS.toFixed(2)}`;
+
+                await new Notification({
+                    title: notifTitle,
+                    body: notifBody,
+                    type: 'referral',
+                    targetUserId: referrer._id,
+                    sentBy: req.userId,
+                }).save();
+
+                if (req.io) {
+                    req.io.emit(`notification:${referrer._id}`, { title: notifTitle, body: notifBody, type: 'referral' });
+                }
+                fcmService.sendToUser(referrer._id, notifTitle, notifBody, { type: 'referral' }).catch(() => { });
+            } else {
+                logger.info('REFERRAL', `Duplicate prevention: bonus already paid to ${referrer.username} for ${user.username}`);
             }
-            fcmService.sendToUser(referrer._id, notifTitle, notifBody, { type: 'referral' }).catch(() => { });
         } else if (referrer && !user.flaggedForFraud && referrer.depositStatus !== 'verified') {
             // Referrer is not yet verified — notify them they need to deposit first
             const pendingTitle = '⏳ Referral Bonus Pending';
@@ -818,9 +830,11 @@ router.post('/deposits/:userId/reject', adminAuth, asyncHandler(async (req, res)
 // ═══════════════════════════════════════════════════
 router.get('/bank-details', adminAuth, asyncHandler(async (req, res) => {
     const settings = await Settings.getSettings();
-    // Wrap in array for compatibility with admin dashboard's expectation
+    // Use toObject() to ensure sub-document fields are correctly spread
+    const bankDetails = settings.bankDetails ? settings.bankDetails.toObject() : {};
+
     res.json([{
-        ...settings.bankDetails,
+        ...bankDetails,
         publishedAt: settings.updatedAt
     }]);
 }));
@@ -921,7 +935,7 @@ router.get('/public-settings', asyncHandler(async (req, res) => {
 router.get('/public-bank-details', asyncHandler(async (req, res) => {
     const settings = await Settings.getSettings();
     if (settings && settings.bankDetails && settings.bankDetails.isActive) {
-        res.json(settings.bankDetails);
+        res.json(settings.bankDetails.toObject());
     } else {
         res.status(404).json({ message: 'Bank details not configured or inactive' });
     }
