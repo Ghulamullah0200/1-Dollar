@@ -50,6 +50,7 @@ router.get('/status', auth, asyncHandler(async (req, res) => {
             minWithdrawal: settings.minWithdrawal,
             payPerRefer: settings.payPerRefer,
             referralsPerPayout: settings.referralsPerPayout,
+            withdrawalBanks: settings.withdrawalBanks || [],
         }
     });
 }));
