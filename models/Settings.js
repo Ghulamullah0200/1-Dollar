@@ -23,6 +23,7 @@ const settingsSchema = new mongoose.Schema({
     referralBonus: { type: Number, default: 0.50 },
     // ═══ WITHDRAWAL SETTINGS ═══
     minWithdrawal: { type: Number, default: 1.00 },
+    withdrawalBanks: { type: [String], default: ['EasyPaisa', 'JazzCash', 'Meezan Bank', 'HBL', 'UBL', 'Allied Bank', 'Bank Alfalah', 'Faysal Bank'] },
     // ═══ PAY PER REFER ═══
     payPerRefer: { type: Number, default: 1.00 },
     referralsPerPayout: { type: Number, default: 3 },
@@ -50,7 +51,8 @@ settingsSchema.statics.updateSettings = async function (updates, adminId) {
     // Explicitly mark them as modified so .save() persists them
     if (updates.bankDetails !== undefined) settings.markModified('bankDetails');
     if (updates.depositPackages !== undefined) settings.markModified('depositPackages');
-
+    if (updates.withdrawalBanks !== undefined) settings.markModified('withdrawalBanks');
+    
     await settings.save();
     return settings;
 };
