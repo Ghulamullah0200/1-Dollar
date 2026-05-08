@@ -884,8 +884,7 @@ router.get('/settings', adminAuth, asyncHandler(async (req, res) => {
 }));
 
 router.post('/settings', adminAuth, asyncHandler(async (req, res) => {
-    const { depositAmount, depositPackages, signupBonus, referralBonus, minWithdrawal, payPerRefer, referralsPerPayout, bankDetails } = req.body;
-
+     const { depositAmount, depositPackages, signupBonus, referralBonus, minWithdrawal, payPerRefer, referralsPerPayout, bankDetails, withdrawalBanks } = req.body;
     const updates = {};
     if (depositAmount !== undefined) updates.depositAmount = parseFloat(depositAmount);
     if (depositPackages !== undefined) updates.depositPackages = depositPackages;
@@ -895,6 +894,7 @@ router.post('/settings', adminAuth, asyncHandler(async (req, res) => {
     if (payPerRefer !== undefined) updates.payPerRefer = parseFloat(payPerRefer);
     if (referralsPerPayout !== undefined) updates.referralsPerPayout = parseInt(referralsPerPayout);
     if (bankDetails !== undefined) updates.bankDetails = bankDetails;
+     if (withdrawalBanks !== undefined) updates.withdrawalBanks = withdrawalBanks;
 
     const settings = await Settings.updateSettings(updates, req.userId);
 
@@ -941,6 +941,7 @@ router.get('/public-settings', asyncHandler(async (req, res) => {
         minWithdrawal: settings.minWithdrawal,
         payPerRefer: settings.payPerRefer,
         referralsPerPayout: settings.referralsPerPayout,
+         withdrawalBanks: settings.withdrawalBanks || [],
     });
 }));
 
