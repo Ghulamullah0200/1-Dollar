@@ -83,6 +83,7 @@ const depositRoutes = require('./api/deposit');
 const configRoutes = require('./api/config');
 const adminRoutes = require('./api/admin');
 const activityRoutes = require('./api/activity');
+const gameRoutes = require('./games/routes/gameRoutes');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
@@ -91,6 +92,7 @@ app.use('/api/deposit', depositRoutes);
 app.use('/api/config', configRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/activity', activityRoutes);
+app.use('/api/games', gameRoutes);
 
 app.get('/api/bank-details', async (req, res) => {
     try {
@@ -154,6 +156,14 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 io.on('connection', (socket) => {
     logger.debug('SOCKET', `Client connected: ${socket.id}`);
 
+    // Game queue subscription
+    socket.on('game:subscribe', (gameName) => {
+        socket.join(`game:${gameName}`);
+    });
+    socket.on('game:unsubscribe', (gameName) => {
+        socket.leave(`game:${gameName}`);
+    });
+
     socket.on('disconnect', () => {
         logger.debug('SOCKET', `Client disconnected: ${socket.id}`);
     });
@@ -188,16 +198,37 @@ mongoose.connect(process.env.MONGODB_URI)
             logger.info('SETUP', '🔑 Default admin created — username: admin, password: admin123');
         }
 
+        // ═══ PERIODIC GAME TASKS ═══
+        // Finalize timed-out matches every 2 minutes
+        setInterval(async () => {
+            try {
+                const MatchManager = require('./games/services/matchManager');
+                await MatchManager.finalizeTimedOutMatches();
+            } catch (err) {
+                logger.error('GAME_CRON', `Timeout finalization failed: ${err.message}`);
+            }
+        }, 2 * 60 * 1000);
+
+        // Deactivate expired subscriptions every 10 minutes
+        setInterval(async () => {
+            try {
+                const GameSubscription = require('./games/models/GameSubscription');
+                const count = await GameSubscription.deactivateExpired();
+                if (count > 0) logger.info('GAME_CRON', `Deactivated ${count} expired subscriptions`);
+            } catch (err) {
+                logger.error('GAME_CRON', `Subscription cleanup failed: ${err.message}`);
+            }
+        }, 10 * 60 * 1000);
+
         server.listen(PORT, () => {
             logger.info('SERVER', `
 ╔══════════════════════════════════════════╗
-║   1 DOLLAR — Referral Earning System     ║
+║   1 DOLLAR — Referral + Gaming System    ║
 ╠══════════════════════════════════════════╣
 ║   Port:    ${PORT}                          ║
 ║   Mode:    ${process.env.NODE_ENV || 'development'}                ║
-║   System:  Referral-Based ($0.50/ref)    ║
-║   Signup:  $0.10 bonus                   ║
-║   Min W/D: $1.00                         ║
+║   Games:   Flappy Bird, Fruit Ninja      ║
+║   Version: 1.6                           ║
 ╚══════════════════════════════════════════╝`);
         });
     })
