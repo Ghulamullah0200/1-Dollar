@@ -21,10 +21,7 @@ router.post('/', auth, asyncHandler(async (req, res) => {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    if (user.depositStatus === 'verified') {
-        return res.status(400).json({ message: 'Your deposit has already been verified' });
-    }
-
+    // Block only duplicate pending deposits — verified users CAN deposit again (reusable packages)
     if (user.depositStatus === 'pending') {
         return res.status(400).json({ message: 'You already have a pending deposit. Please wait for admin verification.' });
     }
@@ -87,12 +84,12 @@ router.post('/resubmit', auth, asyncHandler(async (req, res) => {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    if (user.depositStatus === 'verified') {
-        return res.status(400).json({ message: 'Your deposit has already been verified' });
+    if (user.depositStatus === 'pending') {
+        return res.status(400).json({ message: 'You already have a pending deposit. Please wait for admin verification.' });
     }
 
-    if (user.depositStatus !== 'rejected') {
-        return res.status(400).json({ message: 'You can only resubmit after a rejection' });
+    if (user.depositStatus !== 'rejected' && user.depositStatus !== 'verified') {
+        return res.status(400).json({ message: 'You can only resubmit after a rejection or verified status' });
     }
 
     const settings = await Settings.getSettings();
