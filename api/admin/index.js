@@ -6,6 +6,7 @@ const Transaction = require('../../models/Transaction');
 const Notification = require('../../models/Notification');
 const AuditLog = require('../../models/AuditLog');
 const Settings = require('../../models/Settings');
+const FakeUser = require('../../models/FakeUser');
 const { adminAuth } = require('../../middleware/auth');
 const { asyncHandler, paginationMeta } = require('../../utils/helpers');
 const logger = require('../../utils/logger');
@@ -917,14 +918,54 @@ router.post('/settings', adminAuth, asyncHandler(async (req, res) => {
 }));
 
 // ═══════════════════════════════════════════════════
-// PUBLIC RANKING (no auth needed)
+// PUBLIC RANKING — Hybrid (Real + Fake users merged)
 // ═══════════════════════════════════════════════════
 router.get('/public-ranking', asyncHandler(async (req, res) => {
-    const ranking = await User.find({ status: { $ne: 'admin' }, depositStatus: 'verified' })
-        .select('username referralCount')
+    // Fetch real verified users
+    const realUsers = await User.find({ status: { $ne: 'admin' }, depositStatus: 'verified' })
+        .select('username referralCount wallet.referralEarnings createdAt')
         .sort({ referralCount: -1 })
-        .limit(100)
+        .limit(200)
         .lean();
+
+    // Fetch active fake users
+    const fakeUsers = await FakeUser.find({ isActive: true })
+        .select('username referrals earnings score joinDate avatar country')
+        .sort({ score: -1 })
+        .limit(200)
+        .lean();
+
+    // Normalize both into a common shape
+    const normalizedReal = realUsers.map(u => ({
+        _id: u._id,
+        username: u.username,
+        referralCount: u.referralCount || 0,
+        earnings: u.wallet?.referralEarnings || 0,
+        score: (u.referralCount || 0) * 10 + (u.wallet?.referralEarnings || 0) * 5,
+        joinDate: u.createdAt,
+        isFake: false,
+    }));
+
+    const normalizedFake = fakeUsers.map(u => ({
+        _id: u._id,
+        username: u.username,
+        referralCount: u.referrals || 0,
+        earnings: u.earnings || 0,
+        score: u.score || 0,
+        joinDate: u.joinDate,
+        avatar: u.avatar,
+        country: u.country,
+        isFake: true,
+    }));
+
+    // Merge and sort by score descending
+    // Real users with high activity will organically outrank fake users
+    const merged = [...normalizedReal, ...normalizedFake]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 100);
+
+    // Strip the isFake flag from public response (clients shouldn't know)
+    const ranking = merged.map(({ isFake, ...rest }) => rest);
 
     res.json({ ranking });
 }));
@@ -966,6 +1007,184 @@ router.get('/public-deposit-settings', asyncHandler(async (req, res) => {
         depositAmount: settings.depositAmount,
         depositPackages: settings.depositPackages || []
     });
+}));
+
+// ═══════════════════════════════════════════════════
+// FAKE USER MANAGEMENT (Admin only)
+// ═══════════════════════════════════════════════════
+
+// Download CSV template
+router.get('/fake-users/template', adminAuth, (req, res) => {
+    const csvHeader = 'username,avatar,country,earnings,wins,referrals,score,joinDate';
+    const sampleRow1 = 'john_doe,,Pakistan,150.50,25,45,850,2024-01-15';
+    const sampleRow2 = 'jane_smith,,India,200.00,30,60,1200,2024-02-20';
+    const sampleRow3 = 'mike_w,,USA,75.25,10,20,400,2024-03-10';
+    const csv = [csvHeader, sampleRow1, sampleRow2, sampleRow3].join('\n');
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename=fake_users_template.csv');
+    res.send(csv);
+});
+
+// Bulk import fake users from CSV data (JSON payload with rows)
+router.post('/fake-users/import', adminAuth, asyncHandler(async (req, res) => {
+    const { rows } = req.body; // Array of objects with CSV fields
+
+    if (!rows || !Array.isArray(rows) || rows.length === 0) {
+        return res.status(400).json({ message: 'No data to import. Send { rows: [...] }' });
+    }
+
+    if (rows.length > 5000) {
+        return res.status(400).json({ message: 'Maximum 5000 rows per import' });
+    }
+
+    const importBatch = `import_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    const errors = [];
+    const validRows = [];
+    const existingUsernames = new Set();
+
+    // Check existing fake usernames for dedup
+    const existingFakes = await FakeUser.find({}).select('username').lean();
+    existingFakes.forEach(f => existingUsernames.add(f.username.toLowerCase()));
+
+    // Also check real usernames
+    const existingReals = await User.find({ status: { $ne: 'admin' } }).select('username').lean();
+    existingReals.forEach(r => existingUsernames.add(r.username.toLowerCase()));
+
+    const seenInBatch = new Set();
+
+    rows.forEach((row, idx) => {
+        const lineNum = idx + 1;
+
+        // Validate username (required)
+        if (!row.username || typeof row.username !== 'string' || row.username.trim().length === 0) {
+            errors.push({ line: lineNum, field: 'username', error: 'Username is required' });
+            return;
+        }
+
+        const username = row.username.trim();
+
+        // Duplicate check
+        if (existingUsernames.has(username.toLowerCase()) || seenInBatch.has(username.toLowerCase())) {
+            errors.push({ line: lineNum, field: 'username', error: `"${username}" already exists (skipped)` });
+            return;
+        }
+
+        // Validate numbers
+        const earnings = parseFloat(row.earnings) || 0;
+        const wins = parseInt(row.wins) || 0;
+        const referrals = parseInt(row.referrals) || 0;
+        const score = parseInt(row.score) || (referrals * 10 + earnings * 5); // Auto-calculate if not provided
+
+        // Validate joinDate
+        let joinDate = new Date();
+        if (row.joinDate) {
+            const parsed = new Date(row.joinDate);
+            if (!isNaN(parsed.getTime())) {
+                joinDate = parsed;
+            }
+        }
+
+        seenInBatch.add(username.toLowerCase());
+
+        validRows.push({
+            username,
+            avatar: (row.avatar || '').trim(),
+            country: (row.country || '').trim(),
+            earnings,
+            wins,
+            referrals,
+            score,
+            joinDate,
+            importBatch,
+            isActive: true,
+        });
+    });
+
+    let inserted = 0;
+    if (validRows.length > 0) {
+        const result = await FakeUser.insertMany(validRows, { ordered: false }).catch(err => {
+            // Handle partial insert failures
+            if (err.insertedDocs) return err.insertedDocs;
+            throw err;
+        });
+        inserted = Array.isArray(result) ? result.length : validRows.length;
+    }
+
+    logger.info('ADMIN', `Fake users imported: ${inserted} inserted, ${errors.length} errors, batch: ${importBatch}`);
+
+    res.json({
+        message: `Import complete: ${inserted} users added`,
+        imported: inserted,
+        errors: errors.slice(0, 50), // Limit error response
+        totalErrors: errors.length,
+        batch: importBatch,
+    });
+}));
+
+// List fake users
+router.get('/fake-users', adminAuth, asyncHandler(async (req, res) => {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const skip = (page - 1) * limit;
+
+    const [fakeUsers, total] = await Promise.all([
+        FakeUser.find()
+            .sort({ score: -1, createdAt: -1 })
+            .skip(skip)
+            .limit(limit)
+            .lean(),
+        FakeUser.countDocuments()
+    ]);
+
+    res.json({
+        fakeUsers,
+        pagination: paginationMeta(page, limit, total)
+    });
+}));
+
+// Delete a single fake user
+router.delete('/fake-users/:id', adminAuth, asyncHandler(async (req, res) => {
+    const result = await FakeUser.findByIdAndDelete(req.params.id);
+    if (!result) return res.status(404).json({ message: 'Fake user not found' });
+    res.json({ message: 'Fake user deleted' });
+}));
+
+// Delete all fake users or by batch
+router.post('/fake-users/clear', adminAuth, asyncHandler(async (req, res) => {
+    const { batch } = req.body;
+    let query = {};
+    if (batch) query.importBatch = batch;
+
+    const result = await FakeUser.deleteMany(query);
+    logger.info('ADMIN', `Cleared ${result.deletedCount} fake users${batch ? ` (batch: ${batch})` : ''}`);
+    res.json({ message: `Deleted ${result.deletedCount} fake users`, deleted: result.deletedCount });
+}));
+
+// Toggle fake user active status
+router.post('/fake-users/:id/toggle', adminAuth, asyncHandler(async (req, res) => {
+    const fakeUser = await FakeUser.findById(req.params.id);
+    if (!fakeUser) return res.status(404).json({ message: 'Fake user not found' });
+
+    fakeUser.isActive = !fakeUser.isActive;
+    await fakeUser.save();
+    res.json({ message: `Fake user ${fakeUser.isActive ? 'activated' : 'deactivated'}`, isActive: fakeUser.isActive });
+}));
+
+// Get import history
+router.get('/fake-users/imports', adminAuth, asyncHandler(async (req, res) => {
+    const imports = await FakeUser.aggregate([
+        { $group: {
+            _id: '$importBatch',
+            count: { $sum: 1 },
+            firstImported: { $min: '$createdAt' },
+            active: { $sum: { $cond: ['$isActive', 1, 0] } },
+        }},
+        { $sort: { firstImported: -1 } },
+        { $limit: 50 }
+    ]);
+
+    res.json({ imports });
 }));
 
 module.exports = router;

@@ -94,6 +94,15 @@ router.post('/', auth, asyncHandler(async (req, res) => {
         `${user.username} requested a $${withdrawAmount.toFixed(2)} withdrawal`,
         { type: 'new_withdrawal', withdrawalId: withdrawal._id.toString() }
     ).catch(() => {});
+
+    // PUSH NOTIFICATION FOR USER
+    const logger = require('../utils/logger');
+    notificationService.sendToUser(
+        user._id,
+        'Withdrawal Submitted! 📤',
+        `Your withdrawal request for $${withdrawAmount.toFixed(2)} has been submitted and is being processed.`,
+        { type: 'withdrawal_submitted' }
+    ).catch(() => {});
     
     res.json({ message: 'Withdrawal request submitted!', wallet: user.wallet });
 }));

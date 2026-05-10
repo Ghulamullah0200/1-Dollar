@@ -68,6 +68,68 @@ router.get('/wallet', auth, asyncHandler(async (req, res) => {
 }));
 
 // ═══════════════════════════════════════════════════
+// WALLET SUMMARY (detailed breakdown)
+// ═══════════════════════════════════════════════════
+router.get('/wallet-summary', auth, asyncHandler(async (req, res) => {
+    const user = await User.findById(req.userId).select('wallet depositStatus').lean();
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Aggregate transaction data for detailed breakdown
+    const [txnStats] = await Transaction.aggregate([
+        { $match: { userId: new (require('mongoose').Types.ObjectId)(req.userId) } },
+        {
+            $group: {
+                _id: null,
+                totalDeposits: {
+                    $sum: { $cond: [{ $and: [{ $eq: ['$type', 'deposit'] }, { $eq: ['$status', 'completed'] }] }, '$amount', 0] }
+                },
+                pendingDeposits: {
+                    $sum: { $cond: [{ $and: [{ $eq: ['$type', 'deposit'] }, { $eq: ['$status', 'pending'] }] }, '$amount', 0] }
+                },
+                totalReferralEarnings: {
+                    $sum: { $cond: [{ $and: [{ $eq: ['$type', 'referral_bonus'] }, { $eq: ['$status', 'completed'] }] }, '$amount', 0] }
+                },
+                totalGameEarnings: {
+                    $sum: { $cond: [{ $and: [{ $eq: ['$type', 'game_reward'] }, { $eq: ['$status', 'completed'] }] }, '$amount', 0] }
+                },
+                totalGameFees: {
+                    $sum: { $cond: [{ $eq: ['$type', 'game_entry_fee'] }, '$amount', 0] }
+                },
+                totalWithdrawn: {
+                    $sum: { $cond: [{ $and: [{ $eq: ['$type', 'withdrawal'] }, { $eq: ['$status', 'completed'] }] }, '$amount', 0] }
+                },
+                pendingWithdrawals: {
+                    $sum: { $cond: [{ $and: [{ $eq: ['$type', 'withdrawal'] }, { $eq: ['$status', 'pending'] }] }, '$amount', 0] }
+                },
+                signupBonus: {
+                    $sum: { $cond: [{ $and: [{ $eq: ['$type', 'signup_bonus'] }, { $eq: ['$status', 'completed'] }] }, '$amount', 0] }
+                },
+            }
+        }
+    ]);
+
+    const stats = txnStats || {};
+    const balance = user.wallet?.balance || 0;
+    const lockedBalance = stats.pendingWithdrawals || 0;
+    const withdrawableBalance = Math.max(0, balance - lockedBalance);
+
+    res.json({
+        balance,
+        totalEarned: user.wallet?.totalEarned || 0,
+        totalDeposits: stats.totalDeposits || 0,
+        pendingDeposits: stats.pendingDeposits || 0,
+        referralEarnings: user.wallet?.referralEarnings || 0,
+        gameEarnings: (stats.totalGameEarnings || 0) - (stats.totalGameFees || 0),
+        signupBonus: user.wallet?.signupBonus || stats.signupBonus || 0,
+        totalWithdrawn: stats.totalWithdrawn || 0,
+        pendingWithdrawals: stats.pendingWithdrawals || 0,
+        withdrawableBalance,
+        lockedBalance,
+        netBalance: balance,
+    });
+}));
+
+// ═══════════════════════════════════════════════════
 // TRANSACTION HISTORY
 // ═══════════════════════════════════════════════════
 router.get('/transactions', auth, asyncHandler(async (req, res) => {

@@ -1,6 +1,12 @@
 /**
  * Firebase Notification Service — FCM Push Notifications
  * Falls back to Socket.IO-only delivery if Firebase is not configured.
+ * 
+ * Functions:
+ *   sendToUser(userId, title, body, data)    — Send to a specific user
+ *   sendToAdmins(title, body, data)          — Send to ALL admin devices
+ *   sendBroadcast(title, body, data)         — Send to all non-admin users
+ *   isAvailable()                            — Check if FCM is initialized
  */
 const logger = require('../utils/logger');
 const User = require('../models/User');
@@ -40,6 +46,9 @@ function getMessaging() {
     }
 }
 
+/**
+ * Send push notification to a single user by userId
+ */
 async function sendToUser(userId, title, body, data = {}) {
     const fcm = getMessaging();
     const user = await User.findById(userId).select('fcmToken username').lean();
@@ -89,6 +98,76 @@ async function sendToUser(userId, title, body, data = {}) {
     }
 }
 
+/**
+ * Send push notification to ALL admin devices.
+ * Finds all users with status='admin' and a valid fcmToken.
+ */
+async function sendToAdmins(title, body, data = {}) {
+    const fcm = getMessaging();
+    if (!fcm) {
+        logger.debug('FCM', 'Firebase not configured — skipping admin push');
+        return { sent: 0, failed: 0 };
+    }
+
+    try {
+        const admins = await User.find({
+            status: 'admin',
+            fcmToken: { $ne: null, $exists: true }
+        }).select('fcmToken username').lean();
+
+        if (admins.length === 0) {
+            logger.debug('FCM', 'No admin devices with FCM tokens — skipping');
+            return { sent: 0, failed: 0 };
+        }
+
+        const tokens = admins.map(a => a.fcmToken).filter(Boolean);
+        if (tokens.length === 0) {
+            return { sent: 0, failed: 0 };
+        }
+
+        const message = {
+            tokens,
+            notification: { title, body },
+            data: {
+                ...data,
+                type: data.type || 'admin_alert',
+                timestamp: new Date().toISOString(),
+            },
+            android: {
+                priority: 'high',
+                notification: {
+                    channelId: 'one_dollar_admin',
+                    icon: 'ic_notification',
+                    color: '#10B981',
+                    sound: 'default',
+                },
+            },
+        };
+
+        const response = await fcm.sendEachForMulticast(message);
+
+        // Cleanup invalid tokens
+        response.responses.forEach((res, idx) => {
+            if (!res.success && (
+                res.error?.code === 'messaging/registration-token-not-registered' ||
+                res.error?.code === 'messaging/invalid-registration-token'
+            )) {
+                User.findOneAndUpdate({ fcmToken: tokens[idx] }, { fcmToken: null }).exec();
+                logger.warn('FCM', `Removed invalid admin token for ${admins[idx]?.username}`);
+            }
+        });
+
+        logger.info('FCM', `Admin push: ${response.successCount} sent, ${response.failureCount} failed (${tokens.length} total)`);
+        return { sent: response.successCount, failed: response.failureCount };
+    } catch (err) {
+        logger.error('FCM', `Admin push failed: ${err.message}`);
+        return { sent: 0, failed: 0 };
+    }
+}
+
+/**
+ * Broadcast push notification to all non-admin users with FCM tokens
+ */
 async function sendBroadcast(title, body, data = {}) {
     const fcm = getMessaging();
     if (!fcm) {
@@ -153,4 +232,4 @@ function isAvailable() {
     return getMessaging() !== null;
 }
 
-module.exports = { sendToUser, sendBroadcast, isAvailable };
+module.exports = { sendToUser, sendToAdmins, sendBroadcast, isAvailable };

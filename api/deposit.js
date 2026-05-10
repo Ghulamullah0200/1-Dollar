@@ -21,13 +21,18 @@ router.post('/', auth, asyncHandler(async (req, res) => {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    // Block only duplicate pending deposits — verified users CAN deposit again (reusable packages)
+    // Only block duplicate PENDING deposits — verified users CAN deposit again
     if (user.depositStatus === 'pending') {
         return res.status(400).json({ message: 'You already have a pending deposit. Please wait for admin verification.' });
     }
 
     const settings = await Settings.getSettings();
     const amount = req.body.amount ? parseFloat(req.body.amount) : settings.depositAmount;
+
+    // Validate amount
+    if (!amount || amount <= 0) {
+        return res.status(400).json({ message: 'Invalid deposit amount' });
+    }
 
     user.depositStatus = 'pending';
     user.depositProof = proof;
@@ -45,7 +50,7 @@ router.post('/', auth, asyncHandler(async (req, res) => {
         description: `Deposit of $${amount.toFixed(2)} submitted for verification`
     }).save();
 
-    // Admin alert
+    // Admin alert via Socket.IO
     if (req.io) {
         req.io.emit('admin:newDeposit', {
             title: '💵 New Deposit Submitted',
@@ -56,13 +61,22 @@ router.post('/', auth, asyncHandler(async (req, res) => {
             timestamp: new Date().toISOString()
         });
     }
-     // PUSH NOTIFICATION FOR ADMINS
+
+    // PUSH NOTIFICATION FOR ADMINS
     notificationService.sendToAdmins(
         '💵 New Deposit Submitted',
         `${user.username} submitted a $${amount.toFixed(2)} deposit for verification`,
         { type: 'new_deposit', userId: user._id.toString() }
     ).catch(err => logger.error('DEPOSIT_PUSH', err.message));
-    
+
+    // PUSH NOTIFICATION FOR USER
+    notificationService.sendToUser(
+        user._id,
+        'Deposit Submitted! 📝',
+        `Hurray! Your deposit request of $${amount.toFixed(2)} has been submitted. Please wait for admin verification.`,
+        { type: 'deposit_submitted' }
+    ).catch(() => {});
+
     logger.info('DEPOSIT', `User ${user.username} submitted deposit of $${amount.toFixed(2)}`);
 
     res.json({
