@@ -8,6 +8,7 @@ const settingsSchema = new mongoose.Schema({
             name: { type: String, default: 'Standard' },
             amount: { type: Number, default: 1.00 },
             description: { type: String, default: '1 queue slot' },
+            type: { type: String, enum: ['platform_fees', 'wallet_topup'], default: 'platform_fees' },
             isActive: { type: Boolean, default: true }
         }
     ],

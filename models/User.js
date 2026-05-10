@@ -48,6 +48,8 @@ const userSchema = new mongoose.Schema({
     depositVerifiedAt: { type: Date, default: null },
     depositVerifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     depositRejectionReason: { type: String, default: '' },
+    pendingDepositType: { type: String, enum: ['platform_fees', 'wallet_topup', ''], default: '' },
+    pendingDepositPackageName: { type: String, default: '' },
     // ═══ PUSH NOTIFICATIONS (FCM) ═══
     fcmToken: { type: String, default: null, index: true },
     lastActiveAt: { type: Date, default: null },

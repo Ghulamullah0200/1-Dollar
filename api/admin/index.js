@@ -612,7 +612,7 @@ router.get('/deposits', adminAuth, asyncHandler(async (req, res) => {
 
     const [users, total] = await Promise.all([
         User.find({ ...query, status: { $ne: 'admin' } })
-            .select('username email depositStatus depositAmount depositProof depositSubmittedAt depositRejectionReason referredBy createdAt')
+            .select('username email depositStatus depositAmount depositProof depositSubmittedAt depositRejectionReason referredBy pendingDepositType pendingDepositPackageName createdAt')
             .populate('referredBy', 'username')
             .sort({ depositSubmittedAt: -1 })
             .skip(skip)
@@ -627,14 +627,61 @@ router.get('/deposits', adminAuth, asyncHandler(async (req, res) => {
 router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res) => {
     const user = await User.findById(req.params.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
-    if (user.depositStatus === 'verified') return res.status(400).json({ message: 'Already verified' });
+
+    const depositType = user.pendingDepositType || 'platform_fees';
+    const depositAmount = user.depositAmount || 0;
+
+    // Block: platform_fees already verified
+    if (depositType === 'platform_fees' && user.depositStatus === 'verified') {
+        return res.status(400).json({ message: 'Platform fees already verified for this user' });
+    }
 
     const settings = await Settings.getSettings();
 
+    // ═══ WALLET TOP-UP: Add amount to user's wallet ═══
+    if (depositType === 'wallet_topup') {
+        user.wallet.balance += depositAmount;
+        user.wallet.totalEarned += depositAmount;
+        user.depositStatus = 'verified'; // Reset to verified (not pending)
+        user.depositVerifiedAt = new Date();
+        user.depositVerifiedBy = req.userId;
+        user.depositRejectionReason = '';
+        user.pendingDepositType = '';
+        user.pendingDepositPackageName = '';
+        await user.save();
+
+        // Update transaction
+        await Transaction.updateOne(
+            { userId: user._id, type: 'deposit', status: 'pending' },
+            { status: 'completed', processedBy: req.userId, processedAt: new Date() }
+        );
+
+        // Notify user
+        const topupTitle = '✅ Wallet Top-up Verified!';
+        const topupBody = `$${depositAmount.toFixed(2)} has been added to your wallet balance.`;
+        await new Notification({
+            title: topupTitle, body: topupBody,
+            type: 'deposit', targetUserId: user._id, sentBy: req.userId,
+        }).save();
+
+        if (req.io) {
+            req.io.emit(`notification:${user._id}`, { title: topupTitle, body: topupBody, type: 'deposit' });
+        }
+        fcmService.sendToUser(user._id, topupTitle, topupBody, { type: 'deposit' }).catch(() => { });
+
+        logger.info('ADMIN', `Wallet top-up verified for ${user.username}: +$${depositAmount.toFixed(2)}`);
+        return res.json({
+            message: `Wallet top-up of $${depositAmount.toFixed(2)} verified for ${user.username}. Balance: $${user.wallet.balance.toFixed(2)}`
+        });
+    }
+
+    // ═══ PLATFORM FEES: Verify user account ═══
     user.depositStatus = 'verified';
     user.depositVerifiedAt = new Date();
     user.depositVerifiedBy = req.userId;
     user.depositRejectionReason = '';
+    user.pendingDepositType = '';
+    user.pendingDepositPackageName = '';
     await user.save();
 
     // Update deposit transaction to completed
@@ -716,8 +763,6 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
     }
 
     // ═══ CHECK: Does newly verified user have referrals already verified? Pay deferred bonuses ═══
-    // When a user gets verified, check if they referred anyone whose deposit is also verified
-    // but the bonus was previously deferred because this user wasn't verified yet
     const referredUsers = await User.find({
         referredBy: user._id,
         depositStatus: 'verified',
@@ -725,7 +770,6 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
     }).lean();
 
     for (const referredUser of referredUsers) {
-        // Check if we already paid a referral bonus for this referred user
         const existingBonus = await Transaction.findOne({
             userId: user._id,
             type: 'referral_bonus',
@@ -773,7 +817,7 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
 
     // Notify user
     const userNotifTitle = '✅ Deposit Verified!';
-    const userNotifBody = 'Your deposit has been verified. You now have full access to all features!';
+    const userNotifBody = 'Your platform fees have been verified. You now have full access to all features!';
     await new Notification({
         title: userNotifTitle,
         body: userNotifBody,
@@ -787,8 +831,8 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
     }
     fcmService.sendToUser(user._id, userNotifTitle, userNotifBody, { type: 'deposit' }).catch(() => { });
 
-    logger.info('ADMIN', `Deposit verified for user ${user.username}`);
-    res.json({ message: `Deposit verified for ${user.username}` });
+    logger.info('ADMIN', `Platform fees verified for user ${user.username}`);
+    res.json({ message: `Platform fees verified for ${user.username}` });
 }));
 
 router.post('/deposits/:userId/reject', adminAuth, asyncHandler(async (req, res) => {
@@ -1013,18 +1057,27 @@ router.get('/public-deposit-settings', asyncHandler(async (req, res) => {
 // FAKE USER MANAGEMENT (Admin only)
 // ═══════════════════════════════════════════════════
 
-// Download CSV template
+// Download CSV template — only fields shown on client ranking page
 router.get('/fake-users/template', adminAuth, (req, res) => {
-    const csvHeader = 'username,avatar,country,earnings,wins,referrals,score,joinDate';
-    const sampleRow1 = 'john_doe,,Pakistan,150.50,25,45,850,2024-01-15';
-    const sampleRow2 = 'jane_smith,,India,200.00,30,60,1200,2024-02-20';
-    const sampleRow3 = 'mike_w,,USA,75.25,10,20,400,2024-03-10';
-    const csv = [csvHeader, sampleRow1, sampleRow2, sampleRow3].join('\n');
+    const csvHeader = 'username,referrals';
+    const sampleRow1 = 'ahmed_khan,45';
+    const sampleRow2 = 'sara_ali,38';
+    const sampleRow3 = 'usman_99,27';
+    const sampleRow4 = 'fatima_noor,19';
+    const csv = [csvHeader, sampleRow1, sampleRow2, sampleRow3, sampleRow4].join('\n');
 
-    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename=fake_users_template.csv');
-    res.send(csv);
+    res.setHeader('Cache-Control', 'no-cache');
+    return res.status(200).send(csv);
 });
+
+// Flush ALL fake users (complete wipe)
+router.delete('/fake-users/flush', adminAuth, asyncHandler(async (req, res) => {
+    const result = await FakeUser.deleteMany({});
+    logger.info('ADMIN', `FLUSHED all fake users: ${result.deletedCount} deleted`);
+    res.json({ message: `Flushed ${result.deletedCount} fake users`, deleted: result.deletedCount });
+}));
 
 // Bulk import fake users from CSV data (JSON payload with rows)
 router.post('/fake-users/import', adminAuth, asyncHandler(async (req, res) => {
