@@ -395,6 +395,33 @@ router.post('/withdrawals/:id/reject', adminAuth, asyncHandler(async (req, res) 
     transaction.processedAt = new Date();
     await transaction.save();
 
+    // Notify user
+    try {
+        const notifTitle = '❌ Withdrawal Rejected';
+        const notifBody = `Your withdrawal of $${transaction.amount.toFixed(2)} was rejected and refunded to your wallet.`;
+        const notif = await new Notification({
+            title: notifTitle,
+            body: notifBody,
+            type: 'withdrawal',
+            targetUserId: transaction.userId,
+            metadata: { transactionId: transaction._id, amount: transaction.amount },
+            sentBy: req.userId,
+        }).save();
+
+        fcmService.sendToUser(transaction.userId, notifTitle, notifBody, {
+            notificationId: notif._id.toString(),
+            type: 'withdrawal'
+        }).catch(() => { });
+
+        if (req.io) {
+            req.io.emit(`notification:${transaction.userId}`, {
+                title: notifTitle, body: notifBody, type: 'withdrawal'
+            });
+        }
+    } catch (notifErr) {
+        logger.warn('NOTIFICATION', 'Failed to create withdrawal rejection notification', notifErr.message);
+    }
+
     res.json({ message: 'Withdrawal rejected and refunded' });
 }));
 
