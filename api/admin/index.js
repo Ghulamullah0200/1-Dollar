@@ -7,6 +7,7 @@ const Notification = require('../../models/Notification');
 const AuditLog = require('../../models/AuditLog');
 const Settings = require('../../models/Settings');
 const FakeUser = require('../../models/FakeUser');
+const AppVersion = require('../../models/AppVersion');
 const { adminAuth } = require('../../middleware/auth');
 const { asyncHandler, paginationMeta } = require('../../utils/helpers');
 const logger = require('../../utils/logger');
