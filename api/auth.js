@@ -138,6 +138,7 @@ router.post('/register', asyncHandler(async (req, res) => {
             referralCode: user.referralCode,
             referralCount: user.referralCount,
             depositStatus: user.depositStatus,
+            hasPaidVerificationFee: user.hasPaidVerificationFee || false,
         }
     });
 }));
@@ -172,6 +173,7 @@ router.post('/login', asyncHandler(async (req, res) => {
             referralCode: user.referralCode,
             referralCount: user.referralCount,
             depositStatus: user.depositStatus,
+            hasPaidVerificationFee: user.hasPaidVerificationFee || false,
         }
     });
 }));
