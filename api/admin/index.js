@@ -1014,7 +1014,7 @@ router.get('/public-ranking', asyncHandler(async (req, res) => {
     const fakeUsers = await FakeUser.find({ isActive: true })
         .select('username referrals earnings score joinDate avatar country')
         .sort({ score: -1 })
-        .limit(200)
+        .limit(7000)
         .lean();
 
     // Normalize both into a common shape
