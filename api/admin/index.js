@@ -1128,19 +1128,21 @@ router.post('/fake-users/import', adminAuth, asyncHandler(async (req, res) => {
     if (rows.length > 5000) {
         return res.status(400).json({ message: 'Maximum 5000 rows per import' });
     }
-
+  
     const importBatch = `import_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
     const errors = [];
-    const validRows = [];
-    const existingUsernames = new Set();
+    const newRows = [];
+    const updateRows = [];
 
-    // Check existing fake usernames for dedup
+    // Build lookup of existing fake usernames → _id for upsert
     const existingFakes = await FakeUser.find({}).select('username').lean();
-    existingFakes.forEach(f => existingUsernames.add(f.username.toLowerCase()));
+    const fakeUsernameMap = new Map(); // lowercase username → doc _id
+    existingFakes.forEach(f => fakeUsernameMap.set(f.username.toLowerCase(), f._id));
 
-    // Also check real usernames
+    // Check real usernames — these should be skipped (real user collision)
+    const realUsernames = new Set();
     const existingReals = await User.find({ status: { $ne: 'admin' } }).select('username').lean();
-    existingReals.forEach(r => existingUsernames.add(r.username.toLowerCase()));
+    existingReals.forEach(r => realUsernames.add(r.username.toLowerCase()));
 
     const seenInBatch = new Set();
 
@@ -1154,10 +1156,17 @@ router.post('/fake-users/import', adminAuth, asyncHandler(async (req, res) => {
         }
 
         const username = row.username.trim();
+        const usernameLower = username.toLowerCase();
 
-        // Duplicate check
-        if (existingUsernames.has(username.toLowerCase()) || seenInBatch.has(username.toLowerCase())) {
-            errors.push({ line: lineNum, field: 'username', error: `"${username}" already exists (skipped)` });
+        // Skip if it collides with a REAL user
+        if (realUsernames.has(usernameLower)) {
+            errors.push({ line: lineNum, field: 'username', error: `"${username}" matches a real user (skipped)` });
+            return;
+        }
+
+        // Skip duplicates within the same CSV batch
+        if (seenInBatch.has(usernameLower)) {
+            errors.push({ line: lineNum, field: 'username', error: `"${username}" duplicate in CSV (skipped)` });
             return;
         }
 
@@ -1176,9 +1185,9 @@ router.post('/fake-users/import', adminAuth, asyncHandler(async (req, res) => {
             }
         }
 
-        seenInBatch.add(username.toLowerCase());
+        seenInBatch.add(usernameLower);
 
-        validRows.push({
+        const rowData = {
             username,
             avatar: (row.avatar || '').trim(),
             country: (row.country || '').trim(),
@@ -1189,24 +1198,58 @@ router.post('/fake-users/import', adminAuth, asyncHandler(async (req, res) => {
             joinDate,
             importBatch,
             isActive: true,
-        });
+        };
+
+        // If this fake user already exists → update it; otherwise → insert new
+        if (fakeUsernameMap.has(usernameLower)) {
+            updateRows.push({ _id: fakeUsernameMap.get(usernameLower), ...rowData });
+        } else {
+            newRows.push(rowData);
+        }
     });
 
     let inserted = 0;
-    if (validRows.length > 0) {
-        const result = await FakeUser.insertMany(validRows, { ordered: false }).catch(err => {
-            // Handle partial insert failures
+    let updated = 0;
+
+    // Insert new fake users
+    if (newRows.length > 0) {
+        const result = await FakeUser.insertMany(newRows, { ordered: false }).catch(err => {
             if (err.insertedDocs) return err.insertedDocs;
             throw err;
         });
-        inserted = Array.isArray(result) ? result.length : validRows.length;
+        inserted = Array.isArray(result) ? result.length : newRows.length;
     }
 
-    logger.info('ADMIN', `Fake users imported: ${inserted} inserted, ${errors.length} errors, batch: ${importBatch}`);
+    // Update existing fake users with new data
+    if (updateRows.length > 0) {
+        const bulkOps = updateRows.map(row => ({
+            updateOne: {
+                filter: { _id: row._id },
+                update: {
+                    $set: {
+                        referrals: row.referrals,
+                        earnings: row.earnings,
+                        wins: row.wins,
+                        score: row.score,
+                        avatar: row.avatar,
+                        country: row.country,
+                        joinDate: row.joinDate,
+                        importBatch: row.importBatch,
+                        isActive: true,
+                    }
+                }
+            }
+        }));
+        const bulkResult = await FakeUser.bulkWrite(bulkOps, { ordered: false });
+        updated = bulkResult.modifiedCount || 0;
+    }
+
+    logger.info('ADMIN', `Fake users imported: ${inserted} inserted, ${updated} updated, ${errors.length} errors, batch: ${importBatch}`);
 
     res.json({
-        message: `Import complete: ${inserted} users added`,
+        message: `Import complete: ${inserted} added, ${updated} updated`,
         imported: inserted,
+        updated,
         errors: errors.slice(0, 50), // Limit error response
         totalErrors: errors.length,
         batch: importBatch,
