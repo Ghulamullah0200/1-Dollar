@@ -5,7 +5,7 @@ const notificationSchema = new mongoose.Schema({
     body: { type: String, required: true, trim: true },
     type: {
         type: String,
-        enum: ['system', 'referral', 'withdrawal', 'deposit', 'broadcast', 'manual'],
+        enum: ['system', 'referral', 'withdrawal', 'deposit', 'broadcast', 'manual', 'game_reward', 'match_result', 'security'],
         default: 'system',
         index: true
     },

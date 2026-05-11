@@ -8,57 +8,84 @@ const logger = require('../../utils/logger');
 class RewardEngine {
     /**
      * Distribute reward for a completed match
+     * @param {Object} match - The completed match document
+     * @param {ObjectId} [winnerId] - Specific winner ID (for multi-winner support)
+     * @param {Number} [prizeAmount] - Specific prize amount (for split prizes)
      */
-    static async distributeReward(match) {
-        if (!match.winnerId) return { success: false, reason: 'no_winner' };
-        if (match.winnerPrize <= 0) return { success: false, reason: 'no_prize' };
+    static async distributeReward(match, winnerId = null, prizeAmount = null) {
+        const targetWinnerId = winnerId || match.winnerId;
+        const targetPrize = prizeAmount || match.winnerPrize;
+
+        if (!targetWinnerId) return { success: false, reason: 'no_winner' };
+        if (targetPrize <= 0) return { success: false, reason: 'no_prize' };
+
+        // Idempotent: prevent duplicate reward for same match + winner
+        const existingReward = await Transaction.findOne({
+            userId: targetWinnerId,
+            type: 'game_reward',
+            description: { $regex: match._id.toString().slice(-8) }
+        });
+        if (existingReward) {
+            logger.warn('REWARD', `Duplicate reward prevented for ${targetWinnerId} in match ${match._id}`);
+            return { success: false, reason: 'duplicate_reward' };
+        }
 
         try {
             // Atomic wallet credit
             const updatedUser = await User.findByIdAndUpdate(
-                match.winnerId,
+                targetWinnerId,
                 {
                     $inc: {
-                        'wallet.balance': match.winnerPrize,
-                        'wallet.totalEarned': match.winnerPrize
+                        'wallet.balance': targetPrize,
+                        'wallet.totalEarned': targetPrize
                     }
                 },
                 { new: true }
             );
 
             if (!updatedUser) {
-                logger.error('REWARD', `Winner ${match.winnerId} not found for match ${match._id}`);
+                logger.error('REWARD', `Winner ${targetWinnerId} not found for match ${match._id}`);
                 return { success: false, reason: 'user_not_found' };
             }
 
             // Create transaction record
             const transaction = await Transaction.create({
-                userId: match.winnerId,
+                userId: targetWinnerId,
                 type: 'game_reward',
-                amount: match.winnerPrize,
+                amount: targetPrize,
                 status: 'completed',
-                description: `${match.gameName} match win — Pool: $${match.totalPool.toFixed(2)}, Prize: $${match.winnerPrize.toFixed(2)}`,
+                description: `${match.gameName} match win — Pool: $${match.totalPool.toFixed(2)}, Prize: $${targetPrize.toFixed(2)} — Match ${match._id.toString().slice(-8)}`,
                 processedAt: new Date()
             });
 
-            // Create fee deduction transactions for all players
-            for (const player of match.players) {
-                await Transaction.create({
-                    userId: player.userId,
-                    type: 'game_entry_fee',
-                    amount: -match.entryFee,
-                    status: 'completed',
-                    description: `${match.gameName} entry fee — Match ${match._id.toString().slice(-8)}`,
-                    processedAt: new Date()
-                });
+            // Create fee deduction transactions for all players (only on first winner call)
+            if (!winnerId || winnerId.toString() === match.winnerId?.toString()) {
+                for (const player of match.players) {
+                    // Check if fee already recorded
+                    const existingFee = await Transaction.findOne({
+                        userId: player.userId,
+                        type: 'game_entry_fee',
+                        description: { $regex: match._id.toString().slice(-8) }
+                    });
+                    if (!existingFee) {
+                        await Transaction.create({
+                            userId: player.userId,
+                            type: 'game_entry_fee',
+                            amount: -match.entryFee,
+                            status: 'completed',
+                            description: `${match.gameName} entry fee — Match ${match._id.toString().slice(-8)}`,
+                            processedAt: new Date()
+                        });
+                    }
+                }
             }
 
-            logger.info('REWARD', `$${match.winnerPrize} credited to ${updatedUser.username} for match ${match._id}`);
+            logger.info('REWARD', `$${targetPrize} credited to ${updatedUser.username} for match ${match._id}`);
 
             return {
                 success: true,
-                prize: match.winnerPrize,
-                winnerId: match.winnerId,
+                prize: targetPrize,
+                winnerId: targetWinnerId,
                 winnerBalance: updatedUser.wallet.balance,
                 transactionId: transaction._id
             };

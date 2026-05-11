@@ -35,7 +35,11 @@ const userSchema = new mongoose.Schema({
     deviceFingerprint: { type: String, default: '' },
     flaggedForFraud: { type: Boolean, default: false, index: true },
     fraudReason: { type: String, default: '' },
-    // ═══ DEPOSIT VERIFICATION ═══
+    // ═══ PERMANENT VERIFICATION (never resets once paid) ═══
+    hasPaidVerificationFee: { type: Boolean, default: false, index: true },
+    verificationApprovedAt: { type: Date, default: null },
+    verificationTransactionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Transaction', default: null },
+    // ═══ CURRENT DEPOSIT REQUEST (transient, resets per request) ═══
     depositStatus: {
         type: String,
         enum: ['none', 'pending', 'verified', 'rejected'],

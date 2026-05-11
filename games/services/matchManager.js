@@ -64,33 +64,54 @@ class MatchManager {
     }
 
     /**
-     * Finalize match — determine winner, distribute rewards
+     * Finalize match — determine winners, distribute rewards
      */
     static async finalizeMatch(matchId) {
         const match = await GameMatch.findById(matchId);
         if (!match) throw new Error('Match not found');
         if (match.status === 'completed') return { status: 'already_completed', match };
 
-        // Determine winner
-        const winner = match.determineWinner();
-        if (winner) {
-            match.winnerId = winner.userId;
-            match.winnerUsername = winner.username;
+        // Determine all winners (dynamic: floor(players/5), min 1)
+        const winners = match.determineWinners();
+        
+        // Set primary winner for backward compatibility
+        if (winners.length > 0) {
+            match.winnerId = winners[0].userId;
+            match.winnerUsername = winners[0].username;
         }
+
+        // Calculate per-winner prize
+        match.calculatePrize();
+        const perWinnerPrize = match.winnerPrize;
+
+        // Store all winners with their prizes
+        match.winners = winners.map((w, i) => ({
+            userId: w.userId,
+            username: w.username,
+            score: w.score,
+            rank: i + 1,
+            prize: perWinnerPrize
+        }));
 
         match.status = 'completed';
         match.completedAt = new Date();
         await match.save();
 
-        // Distribute reward
-        let rewardResult = null;
-        if (winner) {
-            rewardResult = await RewardEngine.distributeReward(match);
+        // Distribute rewards to ALL winners
+        let rewardResults = [];
+        for (const winner of winners) {
+            try {
+                const result = await RewardEngine.distributeReward(match, winner.userId, perWinnerPrize);
+                rewardResults.push(result);
+            } catch (err) {
+                logger.error('REWARD', `Failed to distribute to ${winner.username}: ${err.message}`);
+            }
         }
 
         // Update all players' stats
         for (const player of match.players) {
-            const isWinner = winner && player.userId.toString() === winner.userId.toString();
+            const winnerEntry = winners.find(w => w.userId.toString() === player.userId.toString());
+            const isWinner = !!winnerEntry;
             await PlayerStats.recordResult(
                 player.userId,
                 player.username,
@@ -98,7 +119,7 @@ class MatchManager {
                 {
                     score: player.score,
                     won: isWinner,
-                    earnings: isWinner ? match.winnerPrize : 0,
+                    earnings: isWinner ? perWinnerPrize : 0,
                     entryFee: match.entryFee
                 }
             );
@@ -110,18 +131,25 @@ class MatchManager {
             );
         }
 
-        logger.info('MATCH', `Match ${matchId} finalized. Winner: ${match.winnerUsername || 'none'}, Prize: $${match.winnerPrize}`);
+        logger.info('MATCH', `Match ${matchId} finalized. ${winners.length} winner(s), Prize: $${perWinnerPrize}/each`);
 
         return {
             status: 'completed',
             match: match.toObject(),
-            winner: winner ? {
-                userId: winner.userId,
-                username: winner.username,
-                score: winner.score,
-                prize: match.winnerPrize
+            winners: winners.map(w => ({
+                userId: w.userId,
+                username: w.username,
+                score: w.score,
+                prize: perWinnerPrize
+            })),
+            // Backward compatible
+            winner: winners.length > 0 ? {
+                userId: winners[0].userId,
+                username: winners[0].username,
+                score: winners[0].score,
+                prize: perWinnerPrize
             } : null,
-            rewardResult
+            rewardResults
         };
     }
 

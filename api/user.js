@@ -15,13 +15,13 @@ router.get('/status', auth, asyncHandler(async (req, res) => {
     const settings = await Settings.getSettings();
 
     const referrals = await User.find({ referredBy: req.userId })
-        .select('username createdAt depositStatus')
+        .select('username createdAt depositStatus hasPaidVerificationFee')
         .sort({ createdAt: -1 })
         .limit(50)
         .lean();
 
     // Count only verified referrals for reward eligibility
-    const verifiedReferralCount = referrals.filter(r => r.depositStatus === 'verified').length;
+    const verifiedReferralCount = referrals.filter(r => r.hasPaidVerificationFee).length;
 
     const MIN_WITHDRAWAL = settings.minWithdrawal;
 
@@ -42,6 +42,8 @@ router.get('/status', auth, asyncHandler(async (req, res) => {
         minWithdrawal: MIN_WITHDRAWAL,
         accountDetails: user.accountDetails,
         depositStatus: user.depositStatus,
+        hasPaidVerificationFee: user.hasPaidVerificationFee || false,
+        verificationApprovedAt: user.verificationApprovedAt,
         // Dynamic settings for client
         settings: {
             depositAmount: settings.depositAmount,

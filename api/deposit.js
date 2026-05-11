@@ -34,7 +34,6 @@ router.post('/', auth, asyncHandler(async (req, res) => {
     }
 
     // ═══ DETERMINE DEPOSIT TYPE ═══
-    // Find the matching package to get its type
     let depositType = 'platform_fees'; // default
     let packageName = '';
 
@@ -47,7 +46,6 @@ router.post('/', auth, asyncHandler(async (req, res) => {
             packageName = pkg.name || '';
         }
     } else if (settings.depositPackages && settings.depositPackages.length > 0) {
-        // Match by amount if no packageId
         const pkg = settings.depositPackages.find(p => p.amount === amount && p.isActive);
         if (pkg) {
             depositType = pkg.type || 'platform_fees';
@@ -56,42 +54,44 @@ router.post('/', auth, asyncHandler(async (req, res) => {
     }
 
     // ═══ ENFORCE RULES ═══
-    // Rule 1: If user is NOT verified, they can ONLY pay platform_fees
-    if (user.depositStatus !== 'verified' && depositType === 'wallet_topup') {
+    // Rule 1: If user has NOT paid verification fee, they can ONLY pay platform_fees
+    if (!user.hasPaidVerificationFee && depositType === 'wallet_topup') {
         return res.status(400).json({
             message: 'You must pay the platform fees first before adding wallet balance.'
         });
     }
 
-    // Rule 2: If user IS verified and tries platform_fees again, block it
-    if (user.depositStatus === 'verified' && depositType === 'platform_fees') {
+    // Rule 2: If user HAS paid verification fee and tries platform_fees again, block it
+    if (user.hasPaidVerificationFee && depositType === 'platform_fees') {
         return res.status(400).json({
             message: 'Platform fees already paid. Select a wallet top-up package to add balance.'
         });
     }
 
+    // ═══ SET TRANSIENT DEPOSIT STATUS (does NOT affect verification) ═══
     user.depositStatus = 'pending';
     user.depositProof = proof;
     user.depositAmount = amount;
     user.depositSubmittedAt = new Date();
     user.depositRejectionReason = '';
-    // Store the deposit type so admin verify logic knows what to do
     user.pendingDepositType = depositType;
     user.pendingDepositPackageName = packageName;
     await user.save();
 
-    // Create deposit transaction with type info
+    // Create deposit transaction with proper type
+    const txnType = depositType === 'platform_fees' ? 'verification' : 'wallet_topup';
     const txnDescription = depositType === 'platform_fees'
         ? `Platform Fees: $${amount.toFixed(2)} submitted for verification`
         : `Wallet Top-up: $${amount.toFixed(2)} submitted for verification${packageName ? ` (${packageName})` : ''}`;
 
     await new Transaction({
         userId: user._id,
-        type: 'deposit',
+        type: txnType,
         amount: amount,
         status: 'pending',
-        description: txnDescription,
-        metadata: { depositType, packageName }
+        depositType: depositType,
+        packageName: packageName,
+        description: txnDescription
     }).save();
 
     // Admin alert via Socket.IO
@@ -148,17 +148,19 @@ router.post('/resubmit', auth, asyncHandler(async (req, res) => {
         return res.status(400).json({ message: 'You already have a pending deposit. Please wait for admin verification.' });
     }
 
-    if (user.depositStatus !== 'rejected' && user.depositStatus !== 'verified') {
-        return res.status(400).json({ message: 'You can only resubmit after a rejection or verified status' });
+    // Allow resubmit from 'rejected' or 'none' (for top-ups after verification)
+    // For verified users who want to top up, they go through the main POST /
+    if (user.depositStatus !== 'rejected' && user.depositStatus !== 'none') {
+        return res.status(400).json({ message: 'You can only resubmit after a rejection.' });
     }
 
     const settings = await Settings.getSettings();
     const amount = req.body.amount ? parseFloat(req.body.amount) : (user.depositAmount || settings.depositAmount);
 
-    // Determine type from the pending deposit or from the amount-matched package
+    // Determine type: if already verified, always wallet_topup
     let depositType = user.pendingDepositType || 'platform_fees';
-    if (user.depositStatus === 'verified') {
-        depositType = 'wallet_topup'; // Verified user resubmitting is always a top-up
+    if (user.hasPaidVerificationFee) {
+        depositType = 'wallet_topup';
     }
 
     user.depositStatus = 'pending';
@@ -169,13 +171,14 @@ router.post('/resubmit', auth, asyncHandler(async (req, res) => {
     user.pendingDepositType = depositType;
     await user.save();
 
+    const txnType = depositType === 'platform_fees' ? 'verification' : 'wallet_topup';
     await new Transaction({
         userId: user._id,
-        type: 'deposit',
+        type: txnType,
         amount: amount,
         status: 'pending',
-        description: `Deposit resubmitted for $${amount.toFixed(2)} (${depositType === 'platform_fees' ? 'Platform Fees' : 'Wallet Top-up'})`,
-        metadata: { depositType }
+        depositType: depositType,
+        description: `Deposit resubmitted for $${amount.toFixed(2)} (${depositType === 'platform_fees' ? 'Platform Fees' : 'Wallet Top-up'})`
     }).save();
 
     if (req.io) {
@@ -195,7 +198,9 @@ router.post('/resubmit', auth, asyncHandler(async (req, res) => {
 // GET DEPOSIT STATUS
 // ═══════════════════════════════════════════════════
 router.get('/status', auth, asyncHandler(async (req, res) => {
-    const user = await User.findById(req.userId).select('depositStatus depositAmount depositSubmittedAt depositRejectionReason pendingDepositType');
+    const user = await User.findById(req.userId).select(
+        'depositStatus depositAmount depositSubmittedAt depositRejectionReason pendingDepositType hasPaidVerificationFee verificationApprovedAt'
+    );
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     const settings = await Settings.getSettings();
@@ -207,6 +212,9 @@ router.get('/status', auth, asyncHandler(async (req, res) => {
         depositSubmittedAt: user.depositSubmittedAt,
         rejectionReason: user.depositRejectionReason,
         pendingDepositType: user.pendingDepositType,
+        // New permanent verification fields
+        hasPaidVerificationFee: user.hasPaidVerificationFee,
+        verificationApprovedAt: user.verificationApprovedAt,
     });
 }));
 

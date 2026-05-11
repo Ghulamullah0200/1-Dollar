@@ -25,7 +25,7 @@ class QueueManager {
         if (user.status === 'suspended' || user.status === 'banned') {
             throw new Error('Account is not eligible to play');
         }
-        if (user.depositStatus !== 'verified') {
+        if (!user.hasPaidVerificationFee) {
             throw new Error('Account must be verified to play games');
         }
 

@@ -32,9 +32,16 @@ const gameMatchSchema = new mongoose.Schema({
     winnerPrize: { type: Number, default: 0 },
     platformFee: { type: Number, default: 0 }, // totalPool - winnerPrize
 
-    // ═══ WINNER ═══
+    // ═══ WINNER(S) ═══
     winnerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     winnerUsername: { type: String, default: '' },
+    winners: [{
+        userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        username: { type: String },
+        score: { type: Number },
+        rank: { type: Number },
+        prize: { type: Number }
+    }],
 
     // ═══ SETTINGS SNAPSHOT ═══
     settings: {
@@ -62,17 +69,15 @@ gameMatchSchema.methods.allPlayersFinished = function () {
 };
 
 /**
- * Determine winner based on scoring mode
+ * Determine winners based on dynamic formula: floor(players/5), minimum 1
  * For ties: earliest finishedAt wins
  */
-gameMatchSchema.methods.determineWinner = function () {
+gameMatchSchema.methods.determineWinners = function () {
     const playedPlayers = this.players.filter(p => p.hasPlayed);
-    if (playedPlayers.length === 0) return null;
+    if (playedPlayers.length === 0) return [];
 
     playedPlayers.sort((a, b) => {
-        // Higher score is better for both modes
         if (b.score !== a.score) return b.score - a.score;
-        // Tiebreaker: earliest finish
         if (a.finishedAt && b.finishedAt) {
             return a.finishedAt.getTime() - b.finishedAt.getTime();
         }
@@ -81,22 +86,32 @@ gameMatchSchema.methods.determineWinner = function () {
 
     // Assign ranks
     playedPlayers.forEach((p, i) => { p.rank = i + 1; });
-
-    // Players who didn't play get last rank
     this.players.filter(p => !p.hasPlayed).forEach(p => {
         p.rank = this.players.length;
     });
 
-    return playedPlayers[0]; // winner
+    // Dynamic winner count: floor(totalPlayers / 5), minimum 1
+    const winnerCount = Math.max(1, Math.floor(this.players.length / 5));
+    return playedPlayers.slice(0, winnerCount);
 };
 
 /**
- * Calculate prize amount
+ * Backward-compatible: returns first winner only
+ */
+gameMatchSchema.methods.determineWinner = function () {
+    const winners = this.determineWinners();
+    return winners.length > 0 ? winners[0] : null;
+};
+
+/**
+ * Calculate prize amount — split among winners
  */
 gameMatchSchema.methods.calculatePrize = function () {
+    const winnerCount = Math.max(1, Math.floor(this.players.length / 5));
     this.totalPool = this.entryFee * this.players.length;
-    this.winnerPrize = parseFloat(((this.totalPool * this.settings.winnerPercentage) / 100).toFixed(2));
-    this.platformFee = parseFloat((this.totalPool - this.winnerPrize).toFixed(2));
+    const totalPrize = parseFloat(((this.totalPool * this.settings.winnerPercentage) / 100).toFixed(2));
+    this.winnerPrize = parseFloat((totalPrize / winnerCount).toFixed(2)); // per-winner prize
+    this.platformFee = parseFloat((this.totalPool - totalPrize).toFixed(2));
     return this.winnerPrize;
 };
 

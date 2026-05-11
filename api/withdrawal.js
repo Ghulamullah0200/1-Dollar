@@ -28,7 +28,7 @@ router.post('/', auth, asyncHandler(async (req, res) => {
     const userCheck = await User.findById(req.userId);
 
     // Check deposit verification
-    if (userCheck.depositStatus !== 'verified') {
+    if (!userCheck.hasPaidVerificationFee) {
         return res.status(403).json({ message: 'Your deposit must be verified before you can withdraw. Please complete the deposit first.' });
     }
 
@@ -122,7 +122,7 @@ router.post('/all', auth, asyncHandler(async (req, res) => {
     if (user.wallet.balance < MIN_WITHDRAWAL) {
         return res.status(400).json({ message: `Minimum withdrawal is $${MIN_WITHDRAWAL.toFixed(2)}` });
     }
-    if (user.depositStatus !== 'verified') {
+    if (!user.hasPaidVerificationFee) {
         return res.status(403).json({ message: 'Your deposit must be verified before you can withdraw.' });
     }
     if (user.status === 'banned') {

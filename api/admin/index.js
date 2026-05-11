@@ -658,8 +658,8 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
     const depositType = user.pendingDepositType || 'platform_fees';
     const depositAmount = user.depositAmount || 0;
 
-    // Block: platform_fees already verified
-    if (depositType === 'platform_fees' && user.depositStatus === 'verified') {
+    // Block: platform_fees already verified (use permanent flag)
+    if (depositType === 'platform_fees' && user.hasPaidVerificationFee) {
         return res.status(400).json({ message: 'Platform fees already verified for this user' });
     }
 
@@ -669,7 +669,8 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
     if (depositType === 'wallet_topup') {
         user.wallet.balance += depositAmount;
         user.wallet.totalEarned += depositAmount;
-        user.depositStatus = 'verified'; // Reset to verified (not pending)
+        // Reset transient deposit status to 'none' so user can submit again immediately
+        user.depositStatus = 'none';
         user.depositVerifiedAt = new Date();
         user.depositVerifiedBy = req.userId;
         user.depositRejectionReason = '';
@@ -679,7 +680,7 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
 
         // Update transaction
         await Transaction.updateOne(
-            { userId: user._id, type: 'deposit', status: 'pending' },
+            { userId: user._id, type: { $in: ['deposit', 'wallet_topup'] }, status: 'pending' },
             { status: 'completed', processedBy: req.userId, processedAt: new Date() }
         );
 
@@ -702,26 +703,36 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
         });
     }
 
-    // ═══ PLATFORM FEES: Verify user account ═══
-    user.depositStatus = 'verified';
+    // ═══ PLATFORM FEES: Permanently verify user account ═══
+    // Set permanent verification flag (NEVER resets)
+    user.hasPaidVerificationFee = true;
+    user.verificationApprovedAt = new Date();
+    // Reset transient deposit status to 'none' (ready for wallet top-ups)
+    user.depositStatus = 'none';
     user.depositVerifiedAt = new Date();
     user.depositVerifiedBy = req.userId;
     user.depositRejectionReason = '';
     user.pendingDepositType = '';
     user.pendingDepositPackageName = '';
-    await user.save();
 
     // Update deposit transaction to completed
-    await Transaction.updateOne(
-        { userId: user._id, type: 'deposit', status: 'pending' },
-        { status: 'completed', processedBy: req.userId, processedAt: new Date() }
+    const completedTxn = await Transaction.findOneAndUpdate(
+        { userId: user._id, type: { $in: ['deposit', 'verification'] }, status: 'pending' },
+        { status: 'completed', processedBy: req.userId, processedAt: new Date() },
+        { new: true }
     );
+    
+    // Store verification transaction ID on user
+    if (completedTxn) {
+        user.verificationTransactionId = completedTxn._id;
+    }
+    await user.save();
 
     // ═══ REFERRAL BONUS — Only if BOTH referrer AND referred user are verified ═══
     if (user.referredBy) {
         const referrer = await User.findById(user.referredBy);
-        if (referrer && !user.flaggedForFraud && referrer.depositStatus === 'verified') {
-            // Both the referrer and the referred user are now deposit-verified
+        if (referrer && !user.flaggedForFraud && referrer.hasPaidVerificationFee) {
+            // Both the referrer and the referred user are now verified
             // Idempotent check — prevent duplicate reward
             const alreadyPaid = await Transaction.findOne({
                 userId: referrer._id,
@@ -767,7 +778,7 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
             } else {
                 logger.info('REFERRAL', `Duplicate prevention: bonus already paid to ${referrer.username} for ${user.username}`);
             }
-        } else if (referrer && !user.flaggedForFraud && referrer.depositStatus !== 'verified') {
+        } else if (referrer && !user.flaggedForFraud && !referrer.hasPaidVerificationFee) {
             // Referrer is not yet verified — notify them they need to deposit first
             const pendingTitle = '⏳ Referral Bonus Pending';
             const pendingBody = `${user.username}'s deposit was verified, but you need to complete your own deposit first to earn the referral bonus.`;
@@ -785,14 +796,14 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
             }
             fcmService.sendToUser(referrer._id, pendingTitle, pendingBody, { type: 'referral' }).catch(() => { });
 
-            logger.info('REFERRAL', `Bonus deferred for ${referrer.username} — referrer not deposit-verified`);
+            logger.info('REFERRAL', `Bonus deferred for ${referrer.username} — referrer not verified`);
         }
     }
 
     // ═══ CHECK: Does newly verified user have referrals already verified? Pay deferred bonuses ═══
     const referredUsers = await User.find({
         referredBy: user._id,
-        depositStatus: 'verified',
+        hasPaidVerificationFee: true,
         flaggedForFraud: { $ne: true }
     }).lean();
 
@@ -993,7 +1004,7 @@ router.post('/settings', adminAuth, asyncHandler(async (req, res) => {
 // ═══════════════════════════════════════════════════
 router.get('/public-ranking', asyncHandler(async (req, res) => {
     // Fetch real verified users
-    const realUsers = await User.find({ status: { $ne: 'admin' }, depositStatus: 'verified' })
+    const realUsers = await User.find({ status: { $ne: 'admin' }, hasPaidVerificationFee: true })
         .select('username referralCount wallet.referralEarnings createdAt')
         .sort({ referralCount: -1 })
         .limit(200)

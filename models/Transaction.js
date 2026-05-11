@@ -4,7 +4,7 @@ const transactionSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     type: {
         type: String,
-        enum: ['signup_bonus', 'referral_bonus', 'withdrawal', 'deposit', 'game_entry_fee', 'game_reward', 'game_subscription'],
+        enum: ['signup_bonus', 'referral_bonus', 'withdrawal', 'deposit', 'verification', 'wallet_topup', 'game_entry_fee', 'game_reward', 'game_subscription'],
         required: true,
         index: true
     },
@@ -22,6 +22,9 @@ const transactionSchema = new mongoose.Schema({
     },
     // For referral_bonus type — who was referred
     referredUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    // Deposit metadata
+    depositType: { type: String, enum: ['platform_fees', 'wallet_topup', ''], default: '' },
+    packageName: { type: String, default: '' },
     description: { type: String, default: '' },
     processedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     processedAt: { type: Date, default: null },

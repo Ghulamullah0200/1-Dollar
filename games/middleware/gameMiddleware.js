@@ -42,8 +42,8 @@ const requireSubscription = async (req, res, next) => {
  */
 const requireVerified = async (req, res, next) => {
     try {
-        const user = await User.findById(req.userId).select('depositStatus').lean();
-        if (!user || user.depositStatus !== 'verified') {
+        const user = await User.findById(req.userId).select('hasPaidVerificationFee').lean();
+        if (!user || !user.hasPaidVerificationFee) {
             return res.status(403).json({
                 message: 'Account must be verified to play games',
                 code: 'VERIFICATION_REQUIRED'
