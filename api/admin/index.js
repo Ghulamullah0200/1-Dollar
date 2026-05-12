@@ -174,6 +174,25 @@ router.post('/users/:id/add-balance', adminAuth, asyncHandler(async (req, res) =
     res.json({ message: `$${amount} added`, wallet: user.wallet });
 }));
 
+router.post('/users/:id/deduct-balance', adminAuth, asyncHandler(async (req, res) => {
+    const { amount } = req.body;
+    if (!amount || amount <= 0) return res.status(400).json({ message: 'Invalid amount' });
+
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    const currentBalance = user.wallet?.balance || 0;
+    if (amount > currentBalance) {
+        return res.status(400).json({ message: `Insufficient balance. Current: $${currentBalance.toFixed(2)}` });
+    }
+
+    user.wallet.balance -= amount;
+    await user.save();
+
+    logger.info('ADMIN', `Balance deducted: -$${amount} from user ${user.username} (${req.params.id})`);
+    res.json({ message: `$${amount} deducted`, wallet: user.wallet });
+}));
+
 router.post('/users/:id/reset-balance', adminAuth, asyncHandler(async (req, res) => {
     const user = await User.findByIdAndUpdate(
         req.params.id,
@@ -521,7 +540,6 @@ router.get('/referral-ranking', adminAuth, asyncHandler(async (req, res) => {
     const ranking = await User.find({ status: { $ne: 'admin' } })
         .select('username referralCount grandReferralCount wallet.referralEarnings createdAt')
         .sort({ referralCount: -1, grandReferralCount: -1 })
-        .limit(100)
         .lean();
 
     res.json({ ranking });
@@ -722,7 +740,7 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
         { status: 'completed', processedBy: req.userId, processedAt: new Date() },
         { new: true }
     );
-    
+
     // Store verification transaction ID on user
     if (completedTxn) {
         user.verificationTransactionId = completedTxn._id;
@@ -968,7 +986,7 @@ router.get('/settings', adminAuth, asyncHandler(async (req, res) => {
 }));
 
 router.post('/settings', adminAuth, asyncHandler(async (req, res) => {
-     const { depositAmount, depositPackages, signupBonus, referralBonus, minWithdrawal, payPerRefer, referralsPerPayout, bankDetails, withdrawalBanks } = req.body;
+    const { depositAmount, depositPackages, signupBonus, referralBonus, minWithdrawal, payPerRefer, referralsPerPayout, bankDetails, withdrawalBanks } = req.body;
     const updates = {};
     if (depositAmount !== undefined) updates.depositAmount = parseFloat(depositAmount);
     if (depositPackages !== undefined) updates.depositPackages = depositPackages;
@@ -978,7 +996,7 @@ router.post('/settings', adminAuth, asyncHandler(async (req, res) => {
     if (payPerRefer !== undefined) updates.payPerRefer = parseFloat(payPerRefer);
     if (referralsPerPayout !== undefined) updates.referralsPerPayout = parseInt(referralsPerPayout);
     if (bankDetails !== undefined) updates.bankDetails = bankDetails;
-     if (withdrawalBanks !== undefined) updates.withdrawalBanks = withdrawalBanks;
+    if (withdrawalBanks !== undefined) updates.withdrawalBanks = withdrawalBanks;
 
     const settings = await Settings.updateSettings(updates, req.userId);
 
@@ -1004,18 +1022,17 @@ router.post('/settings', adminAuth, asyncHandler(async (req, res) => {
 // PUBLIC RANKING — Hybrid (Real + Fake users merged)
 // ═══════════════════════════════════════════════════
 router.get('/public-ranking', asyncHandler(async (req, res) => {
-    // Fetch real verified users
+    // Fetch real verified users (no limit — show all)
     const realUsers = await User.find({ status: { $ne: 'admin' }, hasPaidVerificationFee: true })
         .select('username referralCount wallet.referralEarnings createdAt')
         .sort({ referralCount: -1 })
-        .limit(200)
         .lean();
 
     // Fetch active fake users
     const fakeUsers = await FakeUser.find({ isActive: true })
         .select('username referrals earnings score joinDate avatar country')
         .sort({ score: -1 })
-        .limit(7000)
+        .limit(5000)
         .lean();
 
     // Normalize both into a common shape
@@ -1044,8 +1061,7 @@ router.get('/public-ranking', asyncHandler(async (req, res) => {
     // Merge and sort by score descending
     // Real users with high activity will organically outrank fake users
     const merged = [...normalizedReal, ...normalizedFake]
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 100);
+        .sort((a, b) => b.score - a.score);
 
     // Strip the isFake flag from public response (clients shouldn't know)
     const ranking = merged.map(({ isFake, ...rest }) => rest);
@@ -1065,7 +1081,7 @@ router.get('/public-settings', asyncHandler(async (req, res) => {
         minWithdrawal: settings.minWithdrawal,
         payPerRefer: settings.payPerRefer,
         referralsPerPayout: settings.referralsPerPayout,
-         withdrawalBanks: settings.withdrawalBanks || [],
+        withdrawalBanks: settings.withdrawalBanks || [],
     });
 }));
 
@@ -1129,7 +1145,7 @@ router.post('/fake-users/import', adminAuth, asyncHandler(async (req, res) => {
     if (rows.length > 5000) {
         return res.status(400).json({ message: 'Maximum 5000 rows per import' });
     }
-  
+
     const importBatch = `import_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
     const errors = [];
     const newRows = [];
@@ -1309,12 +1325,14 @@ router.post('/fake-users/:id/toggle', adminAuth, asyncHandler(async (req, res) =
 // Get import history
 router.get('/fake-users/imports', adminAuth, asyncHandler(async (req, res) => {
     const imports = await FakeUser.aggregate([
-        { $group: {
-            _id: '$importBatch',
-            count: { $sum: 1 },
-            firstImported: { $min: '$createdAt' },
-            active: { $sum: { $cond: ['$isActive', 1, 0] } },
-        }},
+        {
+            $group: {
+                _id: '$importBatch',
+                count: { $sum: 1 },
+                firstImported: { $min: '$createdAt' },
+                active: { $sum: { $cond: ['$isActive', 1, 0] } },
+            }
+        },
         { $sort: { firstImported: -1 } },
         { $limit: 50 }
     ]);
