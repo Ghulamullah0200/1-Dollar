@@ -1019,54 +1019,82 @@ router.post('/settings', adminAuth, asyncHandler(async (req, res) => {
 }));
 
 // ═══════════════════════════════════════════════════
-// PUBLIC RANKING — Hybrid (Real + Fake users merged)
+// PUBLIC RANKING — Hybrid (Real + Fake users merged) with pagination
 // ═══════════════════════════════════════════════════
+
+// Cache the merged ranking for 30 seconds to avoid re-computing on every page request
+let rankingCache = null;
+let rankingCacheTime = 0;
+const RANKING_CACHE_TTL = 30000;
+
 router.get('/public-ranking', asyncHandler(async (req, res) => {
-    // Fetch real verified users (no limit — show all)
-    const realUsers = await User.find({ status: { $ne: 'admin' }, hasPaidVerificationFee: true })
-        .select('username referralCount wallet.referralEarnings createdAt')
-        .sort({ referralCount: -1 })
-        .lean();
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 100;
 
-    // Fetch active fake users
-    const fakeUsers = await FakeUser.find({ isActive: true })
-        .select('username referrals earnings score joinDate avatar country')
-        .sort({ score: -1 })
-        .limit(5000)
-        .lean();
+    let merged;
 
-    // Normalize both into a common shape
-    const normalizedReal = realUsers.map(u => ({
-        _id: u._id,
-        username: u.username,
-        referralCount: u.referralCount || 0,
-        earnings: u.wallet?.referralEarnings || 0,
-        score: (u.referralCount || 0) * 10 + (u.wallet?.referralEarnings || 0) * 5,
-        joinDate: u.createdAt,
-        isFake: false,
-    }));
+    // Use cache if fresh
+    if (rankingCache && Date.now() - rankingCacheTime < RANKING_CACHE_TTL) {
+        merged = rankingCache;
+    } else {
+        // Fetch real verified users (no limit — show all)
+        const realUsers = await User.find({ status: { $ne: 'admin' }, hasPaidVerificationFee: true })
+            .select('username referralCount wallet.referralEarnings createdAt')
+            .sort({ referralCount: -1 })
+            .lean();
 
-    const normalizedFake = fakeUsers.map(u => ({
-        _id: u._id,
-        username: u.username,
-        referralCount: u.referrals || 0,
-        earnings: u.earnings || 0,
-        score: u.score || 0,
-        joinDate: u.joinDate,
-        avatar: u.avatar,
-        country: u.country,
-        isFake: true,
-    }));
+        // Fetch active fake users (no limit — show all)
+        const fakeUsers = await FakeUser.find({ isActive: true })
+            .select('username referrals earnings score joinDate avatar country')
+            .sort({ score: -1 })
+            .lean();
 
-    // Merge and sort by score descending
-    // Real users with high activity will organically outrank fake users
-    const merged = [...normalizedReal, ...normalizedFake]
-        .sort((a, b) => b.score - a.score);
+        // Normalize both into a common shape
+        const normalizedReal = realUsers.map(u => ({
+            _id: u._id,
+            username: u.username,
+            referralCount: u.referralCount || 0,
+            earnings: u.wallet?.referralEarnings || 0,
+            score: (u.referralCount || 0) * 10 + (u.wallet?.referralEarnings || 0) * 5,
+            joinDate: u.createdAt,
+            isFake: false,
+        }));
+
+        const normalizedFake = fakeUsers.map(u => ({
+            _id: u._id,
+            username: u.username,
+            referralCount: u.referrals || 0,
+            earnings: u.earnings || 0,
+            score: u.score || 0,
+            joinDate: u.joinDate,
+            avatar: u.avatar,
+            country: u.country,
+            isFake: true,
+        }));
+
+        // Merge and sort by score descending
+        merged = [...normalizedReal, ...normalizedFake]
+            .sort((a, b) => b.score - a.score);
+
+        // Update cache
+        rankingCache = merged;
+        rankingCacheTime = Date.now();
+    }
+
+    const total = merged.length;
+    const skip = (page - 1) * limit;
+    const paged = merged.slice(skip, skip + limit);
 
     // Strip the isFake flag from public response (clients shouldn't know)
-    const ranking = merged.map(({ isFake, ...rest }) => rest);
+    const ranking = paged.map(({ isFake, ...rest }) => rest);
 
-    res.json({ ranking });
+    res.json({
+        ranking,
+        total,
+        page,
+        limit,
+        hasMore: skip + limit < total,
+    });
 }));
 
 // ═══════════════════════════════════════════════════
