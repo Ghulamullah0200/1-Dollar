@@ -83,10 +83,10 @@ router.get('/wallet-summary', auth, asyncHandler(async (req, res) => {
             $group: {
                 _id: null,
                 totalDeposits: {
-                    $sum: { $cond: [{ $and: [{ $eq: ['$type', 'deposit'] }, { $eq: ['$status', 'completed'] }] }, '$amount', 0] }
+                    $sum: { $cond: [{ $and: [{ $in: ['$type', ['verification', 'wallet_topup']] }, { $eq: ['$status', 'completed'] }] }, '$amount', 0] }
                 },
                 pendingDeposits: {
-                    $sum: { $cond: [{ $and: [{ $eq: ['$type', 'deposit'] }, { $eq: ['$status', 'pending'] }] }, '$amount', 0] }
+                    $sum: { $cond: [{ $and: [{ $in: ['$type', ['verification', 'wallet_topup']] }, { $eq: ['$status', 'pending'] }] }, '$amount', 0] }
                 },
                 totalReferralEarnings: {
                     $sum: { $cond: [{ $and: [{ $eq: ['$type', 'referral_bonus'] }, { $eq: ['$status', 'completed'] }] }, '$amount', 0] }

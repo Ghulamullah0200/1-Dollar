@@ -5,14 +5,17 @@ const GameSettings = require('../models/GameSettings');
 const GameSubscription = require('../models/GameSubscription');
 const User = require('../../models/User');
 const crypto = require('crypto');
+const { SUPPORTED_GAMES } = require('../constants');
 
 /**
  * Validate game name parameter
  */
 const validateGameName = (req, res, next) => {
     const gameName = req.params.gameName || req.body.gameName;
-    if (!gameName || !['flappy-bird', 'fruit-ninja'].includes(gameName)) {
-        return res.status(400).json({ message: 'Invalid game name. Must be "flappy-bird" or "fruit-ninja".' });
+    if (!gameName || !SUPPORTED_GAMES.includes(gameName)) {
+        return res.status(400).json({
+            message: `Invalid game name. Supported: ${SUPPORTED_GAMES.join(', ')}.`
+        });
     }
     req.gameName = gameName;
     next();
@@ -91,7 +94,11 @@ const validateScore = (req, res, next) => {
 
     // Score hash verification (simple HMAC)
     if (scoreHash) {
-        const secret = process.env.GAME_SCORE_SECRET || process.env.JWT_SECRET;
+        if (!process.env.GAME_SCORE_SECRET) {
+            console.warn('[WARN] GAME_SCORE_SECRET is not set. Score hash verification is disabled for this request.');
+            return next();
+        }
+        const secret = process.env.GAME_SCORE_SECRET;
         const expectedHash = crypto
             .createHmac('sha256', secret)
             .update(`${req.userId}:${req.body.matchId}:${score}:${duration}`)

@@ -4,7 +4,7 @@ const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const Settings = require('../models/Settings');
 const { auth } = require('../middleware/auth');
-const { asyncHandler } = require('../utils/helpers');
+const { asyncHandler, emitToAdmin } = require('../utils/helpers');
 const logger = require('../utils/logger');
 const notificationService = require('../services/notificationService');
 
@@ -97,7 +97,7 @@ router.post('/', auth, asyncHandler(async (req, res) => {
     // Admin alert via Socket.IO
     const typeLabel = depositType === 'platform_fees' ? '🏷️ Platform Fees' : '💰 Wallet Top-up';
     if (req.io) {
-        req.io.emit('admin:newDeposit', {
+        const depositPayload = {
             title: `💵 ${typeLabel}`,
             body: `${user.username} submitted $${amount.toFixed(2)} (${typeLabel})`,
             username: user.username,
@@ -105,7 +105,9 @@ router.post('/', auth, asyncHandler(async (req, res) => {
             amount: amount,
             depositType: depositType,
             timestamp: new Date().toISOString()
-        });
+        };
+        req.io.emit('admin:newDeposit', depositPayload);
+        emitToAdmin(req.io, 'admin:newDeposit', depositPayload);
     }
 
     // Push notifications
@@ -182,13 +184,15 @@ router.post('/resubmit', auth, asyncHandler(async (req, res) => {
     }).save();
 
     if (req.io) {
-        req.io.emit('admin:newDeposit', {
+        const resubPayload = {
             title: '🔄 Deposit Resubmitted',
             body: `${user.username} resubmitted deposit proof`,
             username: user.username,
             userId: user._id,
             timestamp: new Date().toISOString()
-        });
+        };
+        req.io.emit('admin:newDeposit', resubPayload);
+        emitToAdmin(req.io, 'admin:newDeposit', resubPayload);
     }
 
     res.json({ message: 'Deposit resubmitted for verification', depositStatus: 'pending' });

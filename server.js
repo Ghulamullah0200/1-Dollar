@@ -27,6 +27,7 @@ const { Server } = require('socket.io');
 const rateLimit = require('express-rate-limit');
 const logger = require('./utils/logger');
 const errorHandler = require('./middleware/errorHandler');
+const { initV2Namespace } = require('./games/sockets/gameSocket');
 
 // ═══════════════════════════════════════════════════
 // APP INIT
@@ -38,6 +39,9 @@ const io = new Server(server, {
     transports: ['websocket', 'polling']
 });
 
+// /v2 — authenticated namespace (JWT required on connect)
+const ioV2 = initV2Namespace(io);
+
 // ═══════════════════════════════════════════════════
 // GLOBAL MIDDLEWARE
 // ═══════════════════════════════════════════════════
@@ -45,9 +49,10 @@ app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Attach Socket.IO to every request for real-time events
+// Attach Socket.IO instances to every request for real-time events
 app.use((req, res, next) => {
-    req.io = io;
+    req.io = io;      // legacy default namespace '/'
+    req.ioV2 = ioV2; // authenticated /v2 namespace
     next();
 });
 
@@ -183,19 +188,23 @@ mongoose.connect(process.env.MONGODB_URI)
     .then(async () => {
         logger.info('DB', '✅ MongoDB connected');
 
-        // Auto-create admin if none exists
+        // Auto-create admin if none exists (development/staging only — never in production)
         const User = require('./models/User');
         const existingAdmin = await User.findOne({ status: 'admin' });
         if (!existingAdmin) {
-            const admin = new User({
-                username: 'admin',
-                email: 'admin@1dollar.info',
-                password: 'admin123',
-                status: 'admin',
-                referralCode: 'ADMIN001'
-            });
-            await admin.save();
-            logger.info('SETUP', '🔑 Default admin created — username: admin, password: admin123');
+            if (process.env.NODE_ENV === 'production') {
+                logger.error('SETUP', '🚨 CRITICAL: No admin user exists. Create one manually using a secure seed process. Auto-creation is disabled in production.');
+            } else {
+                const admin = new User({
+                    username: 'admin',
+                    email: 'admin@1dollar.info',
+                    password: 'admin123',
+                    status: 'admin',
+                    referralCode: 'ADMIN001'
+                });
+                await admin.save();
+                logger.info('SETUP', '🔑 Default admin created (dev only) — username: admin, password: admin123');
+            }
         }
 
         // ═══ PERIODIC GAME TASKS ═══
@@ -219,6 +228,42 @@ mongoose.connect(process.env.MONGODB_URI)
                 logger.error('GAME_CRON', `Subscription cleanup failed: ${err.message}`);
             }
         }, 10 * 60 * 1000);
+
+        // Enforce human-turn timeouts in Carrom bot rooms every 20 seconds (Phase 3B).
+        // Shorter interval so paid rooms are forfeited promptly after timeout fires.
+        setInterval(async () => {
+            try {
+                const RoomManager = require('./games/services/roomManager');
+                const count = await RoomManager.finalizeTurnTimeouts(ioV2);
+                if (count > 0) {
+                    logger.info('GAME_CRON', `Turn-timeout: finalised ${count} bot room(s)`);
+                }
+            } catch (err) {
+                logger.error('GAME_CRON', `finalizeTurnTimeouts failed: ${err.message}`);
+            }
+        }, 20 * 1000);
+
+        // Enforce GameRoom lifecycle timeouts every 60 seconds:
+        //   1. Waiting rooms whose waitingTimeoutAt has passed (online matchmaking rooms)
+        //   2. Active/paused online rooms where a player has been disconnected too long
+        // Tightened from 2 min → 60 s (OM1) so waiting-room refunds fire promptly.
+        setInterval(async () => {
+            try {
+                const RoomManager = require('./games/services/roomManager');
+                const [waitingCount, disconnectedCount] = await Promise.all([
+                    RoomManager.finalizeTimedOutRooms(io),
+                    RoomManager.finalizeDisconnectedRooms(io)
+                ]);
+                if (waitingCount > 0) {
+                    logger.info('GAME_CRON', `Cancelled ${waitingCount} timed-out waiting room(s)`);
+                }
+                if (disconnectedCount > 0) {
+                    logger.info('GAME_CRON', `Cancelled ${disconnectedCount} abandoned room(s) due to disconnect`);
+                }
+            } catch (err) {
+                logger.error('GAME_CRON', `Room lifecycle finalization failed: ${err.message}`);
+            }
+        }, 60 * 1000);
 
         server.listen(PORT, () => {
             logger.info('SERVER', `

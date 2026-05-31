@@ -19,11 +19,13 @@ class RewardEngine {
         if (!targetWinnerId) return { success: false, reason: 'no_winner' };
         if (targetPrize <= 0) return { success: false, reason: 'no_prize' };
 
-        // Idempotent: prevent duplicate reward for same match + winner
+        // Idempotent: primary guard via matchId; secondary legacy fallback via description regex
+        const rewardIkey = `reward_${match._id}_${targetWinnerId}`;
         const existingReward = await Transaction.findOne({
-            userId: targetWinnerId,
-            type: 'game_reward',
-            description: { $regex: match._id.toString().slice(-8) }
+            $or: [
+                { idempotencyKey: rewardIkey },
+                { userId: targetWinnerId, type: 'game_reward', matchId: match._id }
+            ]
         });
         if (existingReward) {
             logger.warn('REWARD', `Duplicate reward prevented for ${targetWinnerId} in match ${match._id}`);
@@ -48,24 +50,28 @@ class RewardEngine {
                 return { success: false, reason: 'user_not_found' };
             }
 
-            // Create transaction record
+            // Create transaction record with matchId + idempotencyKey
             const transaction = await Transaction.create({
                 userId: targetWinnerId,
                 type: 'game_reward',
                 amount: targetPrize,
                 status: 'completed',
                 description: `${match.gameName} match win — Pool: $${match.totalPool.toFixed(2)}, Prize: $${targetPrize.toFixed(2)} — Match ${match._id.toString().slice(-8)}`,
-                processedAt: new Date()
+                matchId: match._id,
+                processedAt: new Date(),
+                idempotencyKey: rewardIkey
             });
 
             // Create fee deduction transactions for all players (only on first winner call)
             if (!winnerId || winnerId.toString() === match.winnerId?.toString()) {
                 for (const player of match.players) {
-                    // Check if fee already recorded
+                    const feeIkey = `entry_fee_${match._id}_${player.userId}`;
+                    // Primary guard: idempotencyKey or matchId; secondary: description regex
                     const existingFee = await Transaction.findOne({
-                        userId: player.userId,
-                        type: 'game_entry_fee',
-                        description: { $regex: match._id.toString().slice(-8) }
+                        $or: [
+                            { idempotencyKey: feeIkey },
+                            { userId: player.userId, type: 'game_entry_fee', matchId: match._id }
+                        ]
                     });
                     if (!existingFee) {
                         await Transaction.create({
@@ -74,7 +80,9 @@ class RewardEngine {
                             amount: -match.entryFee,
                             status: 'completed',
                             description: `${match.gameName} entry fee — Match ${match._id.toString().slice(-8)}`,
-                            processedAt: new Date()
+                            matchId: match._id,
+                            processedAt: new Date(),
+                            idempotencyKey: feeIkey
                         });
                     }
                 }

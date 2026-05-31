@@ -8,7 +8,7 @@ const gameQueueSchema = new mongoose.Schema({
     username: { type: String, required: true },
     gameName: {
         type: String,
-        enum: ['flappy-bird', 'fruit-ninja'],
+        enum: ['flappy-bird', 'fruit-ninja', 'carrom', 'ludo'],
         required: true
     },
     entryFee: { type: Number, required: true },

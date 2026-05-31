@@ -6,6 +6,8 @@ const GameMatch = require('../models/GameMatch');
 const GameSettings = require('../models/GameSettings');
 const GameSubscription = require('../models/GameSubscription');
 const User = require('../../models/User');
+const Transaction = require('../../models/Transaction');
+const crypto = require('crypto');
 const logger = require('../../utils/logger');
 
 class QueueManager {
@@ -130,7 +132,7 @@ class QueueManager {
 
             try {
                 const match = await this._createMatchFromBatch(batch, settings);
-                matches.push(match);
+                if (match) matches.push(match);
             } catch (err) {
                 logger.error('QUEUE', `Failed to create match: ${err.message}`);
             }
@@ -140,12 +142,73 @@ class QueueManager {
     }
 
     /**
-     * Internal: Create a match from a batch of players
+     * Internal: Create a match from a batch of players.
+     * Entry fees are deducted BEFORE the match is created.
+     * If any player cannot be charged, all already-charged players are refunded
+     * and the match is NOT created. Returns null on abort.
      */
     static async _createMatchFromBatch(players, settings) {
+        // Unique ID for this formation attempt — used to make refund idempotencyKeys deterministic
+        const batchAttemptId = crypto.randomBytes(8).toString('hex');
+
+        // STEP 1: Attempt entry fee deduction for every player atomically
+        const chargedPlayers = [];
+        const failedPlayers = [];
+
+        for (const player of players) {
+            const deducted = await User.findOneAndUpdate(
+                { _id: player.userId, 'wallet.balance': { $gte: settings.entryFee } },
+                { $inc: { 'wallet.balance': -settings.entryFee } }
+            );
+            if (deducted) {
+                chargedPlayers.push(player);
+            } else {
+                failedPlayers.push(player);
+                logger.warn('MATCH', `Player ${player.username} (${player.userId}) has insufficient balance — cannot charge entry fee`);
+            }
+        }
+
+        // STEP 2: If any player could not be charged, abort and refund
+        if (failedPlayers.length > 0) {
+            // Refund every player that was already charged
+            for (const player of chargedPlayers) {
+                await User.findByIdAndUpdate(
+                    player.userId,
+                    { $inc: { 'wallet.balance': settings.entryFee } }
+                );
+                try {
+                    await Transaction.create({
+                        userId: player.userId,
+                        type: 'game_cancel_refund',
+                        amount: settings.entryFee,
+                        status: 'completed',
+                        description: `${settings.gameName} entry fee refund — match not formed (insufficient balance in batch)`,
+                        processedAt: new Date(),
+                        idempotencyKey: `queue_refund_${batchAttemptId}_${player.userId}`
+                    });
+                } catch (txErr) {
+                    if (txErr.code !== 11000) {
+                        logger.error('MATCH', `Failed to record cancel-refund transaction for ${player.username}: ${txErr.message}`);
+                    }
+                }
+                // Reset this player back to waiting so they can be re-matched
+                await GameQueue.findByIdAndUpdate(player._id, { status: 'waiting' });
+                logger.info('MATCH', `Player ${player.username} refunded $${settings.entryFee} and returned to waiting queue`);
+            }
+
+            // Remove insufficient-balance players from queue
+            for (const player of failedPlayers) {
+                await GameQueue.findByIdAndUpdate(player._id, { status: 'cancelled' });
+                logger.warn('QUEUE', `Player ${player.username} (${player.userId}) removed from queue — insufficient balance at match formation`);
+            }
+
+            logger.error('MATCH', `Match formation aborted for ${settings.gameName} — ${failedPlayers.length} player(s) had insufficient funds. ${chargedPlayers.length} player(s) refunded and returned to queue.`);
+            return null;
+        }
+
+        // STEP 3: All players charged — create the match
         const timeoutAt = new Date(Date.now() + settings.matchTimeoutMinutes * 60 * 1000);
 
-        // Create the match
         const match = await GameMatch.create({
             gameName: settings.gameName,
             players: players.map(p => ({
@@ -170,15 +233,8 @@ class QueueManager {
         match.calculatePrize();
         await match.save();
 
-        // Deduct entry fees from all players' wallets atomically
+        // STEP 4: Mark all queue entries as matched
         for (const player of players) {
-            await User.findByIdAndUpdate(player.userId, {
-                $inc: {
-                    'wallet.balance': -settings.entryFee
-                }
-            });
-
-            // Update queue entry
             await GameQueue.findByIdAndUpdate(player._id, {
                 status: 'matched',
                 matchId: match._id

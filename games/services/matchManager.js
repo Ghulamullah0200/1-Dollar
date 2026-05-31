@@ -6,6 +6,7 @@ const GameSession = require('../models/GameSession');
 const GameQueue = require('../models/GameQueue');
 const PlayerStats = require('../models/PlayerStats');
 const RewardEngine = require('./rewardEngine');
+const Transaction = require('../../models/Transaction');
 const logger = require('../../utils/logger');
 
 class MatchManager {
@@ -216,11 +217,35 @@ class MatchManager {
         if (!match) throw new Error('Match not found');
         if (match.status === 'completed') throw new Error('Cannot cancel completed match');
 
-        // Refund all players
+        const User = require('../../models/User');
+        const refundedPlayers = [];
+
+        // Refund all players with idempotency — skip if already refunded (retry-safe)
         for (const player of match.players) {
-            await require('../../models/User').findByIdAndUpdate(player.userId, {
+            const ikey = `cancel_refund_${match._id}_${player.userId}`;
+            const alreadyRefunded = await Transaction.findOne({ idempotencyKey: ikey });
+            if (alreadyRefunded) {
+                logger.warn('MATCH', `Cancel refund already issued for player ${player.userId} in match ${matchId} — skipping`);
+                refundedPlayers.push({ userId: player.userId, username: player.username, skipped: true });
+                continue;
+            }
+
+            await User.findByIdAndUpdate(player.userId, {
                 $inc: { 'wallet.balance': match.entryFee }
             });
+
+            await Transaction.create({
+                userId: player.userId,
+                type: 'game_cancel_refund',
+                amount: match.entryFee,
+                status: 'completed',
+                description: `${match.gameName} match cancelled — entry fee refunded`,
+                matchId: match._id,
+                processedAt: new Date(),
+                idempotencyKey: ikey
+            });
+
+            refundedPlayers.push({ userId: player.userId, username: player.username, amount: match.entryFee });
         }
 
         match.status = 'cancelled';
@@ -233,7 +258,7 @@ class MatchManager {
             { status: 'cancelled' }
         );
 
-        logger.info('MATCH', `Match ${matchId} cancelled. All ${match.players.length} players refunded $${match.entryFee}`);
+        logger.info('MATCH', `Match ${matchId} cancelled. ${refundedPlayers.length} player(s) refunded $${match.entryFee} each`);
 
         return match;
     }

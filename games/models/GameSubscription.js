@@ -7,7 +7,7 @@ const gameSubscriptionSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     gameName: {
         type: String,
-        enum: ['flappy-bird', 'fruit-ninja'],
+        enum: ['flappy-bird', 'fruit-ninja', 'carrom', 'ludo'],
         required: true
     },
     // ═══ SUBSCRIPTION STATE ═══

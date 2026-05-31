@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 const User = require('../../models/User');
 const Transaction = require('../../models/Transaction');
 const Notification = require('../../models/Notification');
@@ -9,7 +10,7 @@ const Settings = require('../../models/Settings');
 const FakeUser = require('../../models/FakeUser');
 const AppVersion = require('../../models/AppVersion');
 const { adminAuth } = require('../../middleware/auth');
-const { asyncHandler, paginationMeta } = require('../../utils/helpers');
+const { asyncHandler, paginationMeta, safeAuditLog, emitToUser, emitToAdmin } = require('../../utils/helpers');
 const logger = require('../../utils/logger');
 const fcmService = require('../../services/notificationService');
 
@@ -163,48 +164,261 @@ router.post('/users/:id/ban', adminAuth, asyncHandler(async (req, res) => {
 }));
 
 router.post('/users/:id/add-balance', adminAuth, asyncHandler(async (req, res) => {
-    const { amount } = req.body;
+    const { amount, reason, operationId } = req.body;
     if (!amount || amount <= 0) return res.status(400).json({ message: 'Invalid amount' });
 
-    const user = await User.findByIdAndUpdate(
-        req.params.id,
-        { $inc: { 'wallet.balance': amount, 'wallet.totalEarned': amount } },
-        { new: true }
-    );
-    res.json({ message: `$${amount} added`, wallet: user.wallet });
+    const before = await User.findById(req.params.id).select('wallet username').lean();
+    if (!before) return res.status(404).json({ message: 'User not found' });
+    const previousBalance = before.wallet?.balance ?? 0;
+
+    // Use caller-supplied operationId for true idempotency; fallback generates a per-request unique suffix
+    // (legacy requests without operationId cannot be deduplicated across retries)
+    const idempotencyKey = operationId
+        ? `admin_credit_op_${operationId}`
+        : `admin_credit_${req.params.id}_${req.userId}_${crypto.randomBytes(8).toString('hex')}`;
+
+    // LOCK: reserve the idempotency slot atomically before wallet mutation.
+    // $setOnInsert is a no-op if the document already exists.
+    // new: false → returns null on insert (we own the lock), existing doc on duplicate.
+    let lockDoc;
+    try {
+        lockDoc = await Transaction.findOneAndUpdate(
+            { idempotencyKey },
+            { $setOnInsert: {
+                userId: req.params.id,
+                type: 'admin_credit',
+                amount,
+                status: 'pending',
+                description: reason ? `Admin credit: ${reason}` : 'Admin credit',
+                processedBy: req.userId,
+                idempotencyKey
+            }},
+            { upsert: true, new: false }
+        );
+    } catch (lockErr) {
+        if (lockErr.code === 11000) {
+            lockDoc = await Transaction.findOne({ idempotencyKey });
+        } else {
+            throw lockErr;
+        }
+    }
+
+    if (lockDoc !== null) {
+        logger.warn('ADMIN', `Duplicate add-balance blocked for ${before.username} (key: ${idempotencyKey}, status: ${lockDoc.status})`);
+        if (lockDoc.status === 'rejected') {
+            return res.status(400).json({ message: lockDoc.description || 'This wallet action was previously rejected.', alreadyProcessed: true });
+        }
+        return res.json({ message: 'This wallet action was already processed.', wallet: before.wallet, alreadyProcessed: true });
+    }
+
+    // We own the lock — mutate wallet, then mark completed
+    try {
+        const user = await User.findByIdAndUpdate(
+            req.params.id,
+            { $inc: { 'wallet.balance': amount, 'wallet.totalEarned': amount } },
+            { new: true }
+        );
+        const newBalance = user.wallet.balance;
+
+        await Transaction.findOneAndUpdate(
+            { idempotencyKey },
+            { $set: { status: 'completed', processedAt: new Date() } }
+        );
+
+        await safeAuditLog({
+            action: 'wallet.admin_credit',
+            performedBy: req.userId,
+            targetType: 'User',
+            targetId: req.params.id,
+            details: { userId: req.params.id, username: before.username, amount, previousBalance, newBalance, reason: reason || '' },
+            ipAddress: req.ip
+        });
+
+        logger.info('ADMIN', `Balance +$${amount} added to ${before.username}`);
+        res.json({ message: `$${amount} added`, wallet: user.wallet });
+    } catch (mutationErr) {
+        await Transaction.findOneAndUpdate(
+            { idempotencyKey },
+            { $set: { status: 'rejected', description: `Admin credit failed: ${mutationErr.message}` } }
+        ).catch(() => {});
+        throw mutationErr;
+    }
 }));
 
 router.post('/users/:id/deduct-balance', adminAuth, asyncHandler(async (req, res) => {
-    const { amount } = req.body;
+    const { amount, reason, operationId } = req.body;
     if (!amount || amount <= 0) return res.status(400).json({ message: 'Invalid amount' });
 
-    const user = await User.findById(req.params.id);
-    if (!user) return res.status(404).json({ message: 'User not found' });
+    const before = await User.findById(req.params.id).select('wallet username').lean();
+    if (!before) return res.status(404).json({ message: 'User not found' });
+    const previousBalance = before.wallet?.balance ?? 0;
 
-    const currentBalance = user.wallet?.balance || 0;
-    if (amount > currentBalance) {
-        return res.status(400).json({ message: `Insufficient balance. Current: $${currentBalance.toFixed(2)}` });
+    const idempotencyKey = operationId
+        ? `admin_debit_op_${operationId}`
+        : `admin_debit_${req.params.id}_${req.userId}_${crypto.randomBytes(8).toString('hex')}`;
+
+    // LOCK: reserve the idempotency slot atomically before wallet mutation
+    let lockDoc;
+    try {
+        lockDoc = await Transaction.findOneAndUpdate(
+            { idempotencyKey },
+            { $setOnInsert: {
+                userId: req.params.id,
+                type: 'admin_debit',
+                amount: -amount,
+                status: 'pending',
+                description: reason ? `Admin debit: ${reason}` : 'Admin debit',
+                processedBy: req.userId,
+                idempotencyKey
+            }},
+            { upsert: true, new: false }
+        );
+    } catch (lockErr) {
+        if (lockErr.code === 11000) {
+            lockDoc = await Transaction.findOne({ idempotencyKey });
+        } else {
+            throw lockErr;
+        }
     }
 
-    user.wallet.balance -= amount;
-    await user.save();
+    if (lockDoc !== null) {
+        logger.warn('ADMIN', `Duplicate deduct-balance blocked for ${before.username} (key: ${idempotencyKey}, status: ${lockDoc.status})`);
+        if (lockDoc.status === 'rejected') {
+            return res.status(400).json({ message: lockDoc.description || 'This wallet action was previously rejected.', alreadyProcessed: true });
+        }
+        return res.json({ message: 'This wallet action was already processed.', wallet: before.wallet, alreadyProcessed: true });
+    }
 
-    logger.info('ADMIN', `Balance deducted: -$${amount} from user ${user.username} (${req.params.id})`);
-    res.json({ message: `$${amount} deducted`, wallet: user.wallet });
+    // We own the lock — validate balance before mutating
+    if (amount > previousBalance) {
+        await Transaction.findOneAndUpdate(
+            { idempotencyKey },
+            { $set: { status: 'rejected', description: `Admin debit rejected — insufficient balance ($${previousBalance.toFixed(2)} available)` } }
+        ).catch(() => {});
+        return res.status(400).json({ message: `Insufficient balance. Current: $${previousBalance.toFixed(2)}` });
+    }
+
+    try {
+        const user = await User.findOneAndUpdate(
+            { _id: req.params.id, 'wallet.balance': { $gte: amount } },
+            { $inc: { 'wallet.balance': -amount } },
+            { new: true }
+        );
+
+        if (!user) {
+            await Transaction.findOneAndUpdate(
+                { idempotencyKey },
+                { $set: { status: 'rejected', description: 'Admin debit rejected — balance changed during processing' } }
+            ).catch(() => {});
+            return res.status(400).json({ message: 'Deduction failed — balance may have changed. Please retry with a new request.' });
+        }
+
+        const newBalance = user.wallet.balance;
+
+        await Transaction.findOneAndUpdate(
+            { idempotencyKey },
+            { $set: { status: 'completed', processedAt: new Date() } }
+        );
+
+        await safeAuditLog({
+            action: 'wallet.admin_debit',
+            performedBy: req.userId,
+            targetType: 'User',
+            targetId: req.params.id,
+            details: { userId: req.params.id, username: before.username, amount, previousBalance, newBalance, reason: reason || '' },
+            ipAddress: req.ip
+        });
+
+        logger.info('ADMIN', `Balance -$${amount} deducted from ${before.username}`);
+        res.json({ message: `$${amount} deducted`, wallet: user.wallet });
+    } catch (mutationErr) {
+        await Transaction.findOneAndUpdate(
+            { idempotencyKey },
+            { $set: { status: 'rejected', description: `Admin debit failed: ${mutationErr.message}` } }
+        ).catch(() => {});
+        throw mutationErr;
+    }
 }));
 
 router.post('/users/:id/reset-balance', adminAuth, asyncHandler(async (req, res) => {
-    const user = await User.findByIdAndUpdate(
-        req.params.id,
-        {
-            'wallet.balance': 0,
-            'wallet.totalEarned': 0,
-            'wallet.signupBonus': 0,
-            'wallet.referralEarnings': 0,
-        },
-        { new: true }
-    );
-    res.json({ message: 'Balance reset', wallet: user.wallet });
+    const { operationId } = req.body;
+
+    const before = await User.findById(req.params.id).select('wallet username').lean();
+    if (!before) return res.status(404).json({ message: 'User not found' });
+    const previousBalance = before.wallet?.balance ?? 0;
+
+    const idempotencyKey = operationId
+        ? `admin_reset_op_${operationId}`
+        : `admin_reset_${req.params.id}_${req.userId}_${crypto.randomBytes(8).toString('hex')}`;
+
+    // LOCK: reserve the idempotency slot atomically before wallet mutation
+    let lockDoc;
+    try {
+        lockDoc = await Transaction.findOneAndUpdate(
+            { idempotencyKey },
+            { $setOnInsert: {
+                userId: req.params.id,
+                type: 'admin_reset',
+                amount: -previousBalance,
+                status: 'pending',
+                description: 'Admin balance reset',
+                processedBy: req.userId,
+                idempotencyKey
+            }},
+            { upsert: true, new: false }
+        );
+    } catch (lockErr) {
+        if (lockErr.code === 11000) {
+            lockDoc = await Transaction.findOne({ idempotencyKey });
+        } else {
+            throw lockErr;
+        }
+    }
+
+    if (lockDoc !== null) {
+        logger.warn('ADMIN', `Duplicate reset-balance blocked for ${before.username} (key: ${idempotencyKey}, status: ${lockDoc.status})`);
+        if (lockDoc.status === 'rejected') {
+            return res.status(400).json({ message: lockDoc.description || 'This wallet action was previously rejected.', alreadyProcessed: true });
+        }
+        return res.json({ message: 'This wallet action was already processed.', wallet: before.wallet, alreadyProcessed: true });
+    }
+
+    // We own the lock — mutate wallet, then mark completed
+    try {
+        const user = await User.findByIdAndUpdate(
+            req.params.id,
+            {
+                'wallet.balance': 0,
+                'wallet.totalEarned': 0,
+                'wallet.signupBonus': 0,
+                'wallet.referralEarnings': 0,
+            },
+            { new: true }
+        );
+
+        await Transaction.findOneAndUpdate(
+            { idempotencyKey },
+            { $set: { status: 'completed', processedAt: new Date() } }
+        );
+
+        await safeAuditLog({
+            action: 'wallet.admin_reset',
+            performedBy: req.userId,
+            targetType: 'User',
+            targetId: req.params.id,
+            details: { userId: req.params.id, username: before.username, previousBalance },
+            ipAddress: req.ip
+        });
+
+        logger.info('ADMIN', `Balance reset to 0 for ${before.username} (was $${previousBalance})`);
+        res.json({ message: 'Balance reset', wallet: user.wallet });
+    } catch (mutationErr) {
+        await Transaction.findOneAndUpdate(
+            { idempotencyKey },
+            { $set: { status: 'rejected', description: `Admin reset failed: ${mutationErr.message}` } }
+        ).catch(() => {});
+        throw mutationErr;
+    }
 }));
 
 // ═══════════════════════════════════════════════════
@@ -391,10 +605,20 @@ router.post('/withdrawals/:id/approve', adminAuth, asyncHandler(async (req, res)
             req.io.emit(`notification:${transaction.userId}`, {
                 title: notifTitle, body: notifBody, type: 'withdrawal'
             });
+            emitToUser(req.io, transaction.userId, 'notification', { title: notifTitle, body: notifBody, type: 'withdrawal' });
         }
     } catch (notifErr) {
         logger.warn('NOTIFICATION', 'Failed to create withdrawal notification', notifErr.message);
     }
+
+    await safeAuditLog({
+        action: 'withdrawal.approve',
+        performedBy: req.userId,
+        targetType: 'Transaction',
+        targetId: transaction._id,
+        details: { userId: transaction.userId, amount: transaction.amount, transactionId: transaction._id },
+        ipAddress: req.ip
+    });
 
     res.json({ message: 'Withdrawal approved and payment completed.' });
 }));
@@ -437,10 +661,20 @@ router.post('/withdrawals/:id/reject', adminAuth, asyncHandler(async (req, res) 
             req.io.emit(`notification:${transaction.userId}`, {
                 title: notifTitle, body: notifBody, type: 'withdrawal'
             });
+            emitToUser(req.io, transaction.userId, 'notification', { title: notifTitle, body: notifBody, type: 'withdrawal' });
         }
     } catch (notifErr) {
         logger.warn('NOTIFICATION', 'Failed to create withdrawal rejection notification', notifErr.message);
     }
+
+    await safeAuditLog({
+        action: 'withdrawal.reject',
+        performedBy: req.userId,
+        targetType: 'Transaction',
+        targetId: transaction._id,
+        details: { userId: transaction.userId, amount: transaction.amount, reason: req.body.reason || '' },
+        ipAddress: req.ip
+    });
 
     res.json({ message: 'Withdrawal rejected and refunded' });
 }));
@@ -488,6 +722,7 @@ router.post('/notifications/send', adminAuth, asyncHandler(async (req, res) => {
 
     if (targetUserId) {
         req.io.emit(`notification:${targetUserId}`, { title, body, type: 'manual' });
+        emitToUser(req.io, targetUserId, 'notification', { title, body, type: 'manual' });
         fcmService.sendToUser(targetUserId, title, body, { notificationId: notification._id.toString() }).catch(() => { });
     } else {
         req.io.emit('notification:broadcast', { title, body, type: 'broadcast' });
@@ -526,10 +761,29 @@ router.post('/notifications/broadcast', adminAuth, asyncHandler(async (req, res)
 // SETTINGS (Admin credentials)
 // ═══════════════════════════════════════════════════
 router.post('/update-credentials', adminAuth, asyncHandler(async (req, res) => {
-    const { username, password } = req.body;
-    if (username) req.user.username = username;
-    if (password) req.user.password = password;
+    const { username, password, currentPassword } = req.body;
+    if (!currentPassword) {
+        return res.status(400).json({ message: 'currentPassword is required' });
+    }
+    const isMatch = await req.user.comparePassword(currentPassword);
+    if (!isMatch) {
+        return res.status(401).json({ message: 'Current password is incorrect' });
+    }
+    if (password && password.length < 8) {
+        return res.status(400).json({ message: 'New password must be at least 8 characters' });
+    }
+    const updatedFields = [];
+    if (username) { req.user.username = username; updatedFields.push('username'); }
+    if (password) { req.user.password = password; updatedFields.push('password'); }
     await req.user.save();
+    await AuditLog.create({
+        action: 'admin.credentials_update',
+        performedBy: req.user._id,
+        targetType: 'User',
+        targetId: req.user._id,
+        details: { updatedFields },
+        ipAddress: req.ip
+    });
     res.json({ message: 'Admin credentials updated' });
 }));
 
@@ -671,7 +925,7 @@ router.get('/deposits', adminAuth, asyncHandler(async (req, res) => {
 }));
 
 router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res) => {
-    const user = await User.findById(req.params.userId);
+    let user = await User.findById(req.params.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     const depositType = user.pendingDepositType || 'platform_fees';
@@ -686,22 +940,36 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
 
     // ═══ WALLET TOP-UP: Add amount to user's wallet ═══
     if (depositType === 'wallet_topup') {
-        user.wallet.balance += depositAmount;
-        user.wallet.totalEarned += depositAmount;
-        // Reset transient deposit status to 'none' so user can submit again immediately
-        user.depositStatus = 'none';
-        user.depositVerifiedAt = new Date();
-        user.depositVerifiedBy = req.userId;
-        user.depositRejectionReason = '';
-        user.pendingDepositType = '';
-        user.pendingDepositPackageName = '';
-        await user.save();
-
-        // Update transaction
-        await Transaction.updateOne(
+        // Idempotency: atomically flip the pending transaction to completed.
+        // If it returns null the deposit was already approved — reject double-approve.
+        const pendingTxn = await Transaction.findOneAndUpdate(
             { userId: user._id, type: { $in: ['deposit', 'wallet_topup'] }, status: 'pending' },
-            { status: 'completed', processedBy: req.userId, processedAt: new Date() }
+            { status: 'completed', processedBy: req.userId, processedAt: new Date() },
+            { new: true }
         );
+        if (!pendingTxn) {
+            return res.status(400).json({ message: 'No pending wallet top-up transaction found — may already be approved.' });
+        }
+
+        // Atomic wallet credit
+        const updatedUser = await User.findByIdAndUpdate(
+            user._id,
+            {
+                $inc: { 'wallet.balance': depositAmount, 'wallet.totalEarned': depositAmount },
+                $set: {
+                    depositStatus: 'none',
+                    depositVerifiedAt: new Date(),
+                    depositVerifiedBy: req.userId,
+                    depositRejectionReason: '',
+                    pendingDepositType: '',
+                    pendingDepositPackageName: ''
+                }
+            },
+            { new: true }
+        );
+        // Use updatedUser for balance in response; fallback to user if null
+        const finalBalance = updatedUser?.wallet?.balance ?? (user.wallet.balance + depositAmount);
+        user = updatedUser || user;
 
         // Notify user
         const topupTitle = '✅ Wallet Top-up Verified!';
@@ -713,12 +981,22 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
 
         if (req.io) {
             req.io.emit(`notification:${user._id}`, { title: topupTitle, body: topupBody, type: 'deposit' });
+            emitToUser(req.io, user._id, 'notification', { title: topupTitle, body: topupBody, type: 'deposit' });
         }
         fcmService.sendToUser(user._id, topupTitle, topupBody, { type: 'deposit' }).catch(() => { });
 
+        await safeAuditLog({
+            action: 'deposit.approve',
+            performedBy: req.userId,
+            targetType: 'User',
+            targetId: user._id,
+            details: { userId: user._id, username: user.username, depositType: 'wallet_topup', amount: depositAmount },
+            ipAddress: req.ip
+        });
+
         logger.info('ADMIN', `Wallet top-up verified for ${user.username}: +$${depositAmount.toFixed(2)}`);
         return res.json({
-            message: `Wallet top-up of $${depositAmount.toFixed(2)} verified for ${user.username}. Balance: $${user.wallet.balance.toFixed(2)}`
+            message: `Wallet top-up of $${depositAmount.toFixed(2)} verified for ${user.username}. Balance: $${finalBalance.toFixed(2)}`
         });
     }
 
@@ -763,10 +1041,13 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
             if (!alreadyPaid) {
                 const REFERRAL_BONUS = settings.referralBonus;
 
-                referrer.wallet.balance += REFERRAL_BONUS;
-                referrer.wallet.totalEarned += REFERRAL_BONUS;
-                referrer.wallet.referralEarnings += REFERRAL_BONUS;
-                await referrer.save();
+                await User.findByIdAndUpdate(referrer._id, {
+                    $inc: {
+                        'wallet.balance': REFERRAL_BONUS,
+                        'wallet.totalEarned': REFERRAL_BONUS,
+                        'wallet.referralEarnings': REFERRAL_BONUS
+                    }
+                });
 
                 // Create referral bonus transaction
                 await new Transaction({
@@ -792,6 +1073,7 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
 
                 if (req.io) {
                     req.io.emit(`notification:${referrer._id}`, { title: notifTitle, body: notifBody, type: 'referral' });
+                    emitToUser(req.io, referrer._id, 'notification', { title: notifTitle, body: notifBody, type: 'referral' });
                 }
                 fcmService.sendToUser(referrer._id, notifTitle, notifBody, { type: 'referral' }).catch(() => { });
             } else {
@@ -812,6 +1094,7 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
 
             if (req.io) {
                 req.io.emit(`notification:${referrer._id}`, { title: pendingTitle, body: pendingBody, type: 'referral' });
+                emitToUser(req.io, referrer._id, 'notification', { title: pendingTitle, body: pendingBody, type: 'referral' });
             }
             fcmService.sendToUser(referrer._id, pendingTitle, pendingBody, { type: 'referral' }).catch(() => { });
 
@@ -866,6 +1149,7 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
 
             if (req.io) {
                 req.io.emit(`notification:${user._id}`, { title: deferredTitle, body: deferredBody, type: 'referral' });
+                emitToUser(req.io, user._id, 'notification', { title: deferredTitle, body: deferredBody, type: 'referral' });
             }
 
             logger.info('REFERRAL', `Deferred bonus paid to ${user.username} for previously-verified referral ${referredUser.username}`);
@@ -885,8 +1169,18 @@ router.post('/deposits/:userId/verify', adminAuth, asyncHandler(async (req, res)
 
     if (req.io) {
         req.io.emit(`notification:${user._id}`, { title: userNotifTitle, body: userNotifBody, type: 'deposit' });
+        emitToUser(req.io, user._id, 'notification', { title: userNotifTitle, body: userNotifBody, type: 'deposit' });
     }
     fcmService.sendToUser(user._id, userNotifTitle, userNotifBody, { type: 'deposit' }).catch(() => { });
+
+    await safeAuditLog({
+        action: 'deposit.approve',
+        performedBy: req.userId,
+        targetType: 'User',
+        targetId: user._id,
+        details: { userId: user._id, username: user.username, depositType: 'platform_fees', amount: depositAmount, transactionId: completedTxn?._id ?? null },
+        ipAddress: req.ip
+    });
 
     logger.info('ADMIN', `Platform fees verified for user ${user.username}`);
     res.json({ message: `Platform fees verified for ${user.username}` });
@@ -902,7 +1196,7 @@ router.post('/deposits/:userId/reject', adminAuth, asyncHandler(async (req, res)
     await user.save();
 
     await Transaction.updateOne(
-        { userId: user._id, type: 'deposit', status: 'pending' },
+        { userId: user._id, type: { $in: ['verification', 'wallet_topup'] }, status: 'pending' },
         { status: 'rejected', processedBy: req.userId, processedAt: new Date() }
     );
 
@@ -919,7 +1213,17 @@ router.post('/deposits/:userId/reject', adminAuth, asyncHandler(async (req, res)
 
     if (req.io) {
         req.io.emit(`notification:${user._id}`, { title: notifTitle, body: notifBody, type: 'deposit' });
+        emitToUser(req.io, user._id, 'notification', { title: notifTitle, body: notifBody, type: 'deposit' });
     }
+
+    await safeAuditLog({
+        action: 'deposit.reject',
+        performedBy: req.userId,
+        targetType: 'User',
+        targetId: user._id,
+        details: { userId: user._id, username: user.username, depositType: user.pendingDepositType || '', reason: user.depositRejectionReason },
+        ipAddress: req.ip
+    });
 
     logger.info('ADMIN', `Deposit rejected for user ${user.username}: ${user.depositRejectionReason}`);
     res.json({ message: `Deposit rejected for ${user.username}` });

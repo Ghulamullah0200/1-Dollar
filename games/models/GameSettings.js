@@ -3,11 +3,12 @@
  * Controls entry fees, rewards, match size, subscriptions, etc.
  */
 const mongoose = require('mongoose');
+const { SUPPORTED_GAMES } = require('../constants');
 
 const gameSettingsSchema = new mongoose.Schema({
     gameName: {
         type: String,
-        enum: ['flappy-bird', 'fruit-ninja'],
+        enum: ['flappy-bird', 'fruit-ninja', 'carrom', 'ludo'],
         required: true,
         unique: true,
         index: true
@@ -44,6 +45,14 @@ const gameSettingsSchema = new mongoose.Schema({
     },
     maxScoreCap: { type: Number, default: 999999 }, // anti-cheat cap
 
+    // ═══ TURN-BASED GAME CONFIG (Carrom / Ludo only) ═══
+    // These fields are optional for score-based games (flappy-bird / fruit-ninja).
+    // Default values are harmless no-ops for games that don't use room mode.
+    botModeEnabled:          { type: Boolean,   default: false },
+    turnTimeoutSeconds:      { type: Number,    default: 30, min: 10 },
+    reconnectTimeoutSeconds: { type: Number,    default: 60, min: 10 },
+    entryFeeTiers:           { type: [Number],  default: [] },
+
     // ═══ META ═══
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
 }, { timestamps: true });
@@ -62,6 +71,7 @@ gameSettingsSchema.statics.getForGame = async function (gameName) {
                 scoringMode: 'survival',
                 entryFee: 0.50,
                 subscriptionPrice: 1.00,
+                isActive: true,
             },
             'fruit-ninja': {
                 gameName: 'fruit-ninja',
@@ -70,9 +80,42 @@ gameSettingsSchema.statics.getForGame = async function (gameName) {
                 scoringMode: 'score',
                 entryFee: 0.50,
                 subscriptionPrice: 1.00,
-            }
+                isActive: true,
+            },
+            carrom: {
+                gameName: 'carrom',
+                displayName: 'Carrom',
+                description: 'Classic board game — coming soon! Gameplay not yet implemented.',
+                scoringMode: 'score',
+                entryFee: 1.00,
+                playersPerMatch: 2,
+                winnerPercentage: 70,
+                subscriptionPrice: 0,
+                subscriptionDurationDays: 30,
+                isActive: false,
+                botModeEnabled: false,
+                turnTimeoutSeconds: 30,
+                reconnectTimeoutSeconds: 60,
+                entryFeeTiers: [0, 1],
+            },
+            ludo: {
+                gameName: 'ludo',
+                displayName: 'Ludo',
+                description: 'Classic dice game — coming soon! Gameplay not yet implemented.',
+                scoringMode: 'score',
+                entryFee: 1.00,
+                playersPerMatch: 2,
+                winnerPercentage: 70,
+                subscriptionPrice: 0,
+                subscriptionDurationDays: 30,
+                isActive: false,
+                botModeEnabled: false,
+                turnTimeoutSeconds: 30,
+                reconnectTimeoutSeconds: 60,
+                entryFeeTiers: [0, 1],
+            },
         };
-        settings = await this.create(defaults[gameName] || { gameName, displayName: gameName });
+        settings = await this.create(defaults[gameName] || { gameName, displayName: gameName, isActive: false });
     }
     return settings;
 };
@@ -96,9 +139,8 @@ gameSettingsSchema.statics.updateForGame = async function (gameName, updates, ad
  * Get all game settings
  */
 gameSettingsSchema.statics.getAllSettings = async function () {
-    // Ensure both games exist
-    await this.getForGame('flappy-bird');
-    await this.getForGame('fruit-ninja');
+    // Ensure all supported games have settings documents (idempotent seed)
+    await Promise.all(SUPPORTED_GAMES.map(g => this.getForGame(g)));
     return this.find({}).lean();
 };
 

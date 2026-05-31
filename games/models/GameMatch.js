@@ -15,7 +15,7 @@ const matchPlayerSchema = new mongoose.Schema({
 const gameMatchSchema = new mongoose.Schema({
     gameName: {
         type: String,
-        enum: ['flappy-bird', 'fruit-ninja'],
+        enum: ['flappy-bird', 'fruit-ninja', 'carrom', 'ludo'],
         required: true,
         index: true
     },

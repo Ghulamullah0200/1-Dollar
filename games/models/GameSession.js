@@ -8,7 +8,7 @@ const gameSessionSchema = new mongoose.Schema({
     matchId: { type: mongoose.Schema.Types.ObjectId, ref: 'GameMatch', required: true, index: true },
     gameName: {
         type: String,
-        enum: ['flappy-bird', 'fruit-ninja'],
+        enum: ['flappy-bird', 'fruit-ninja', 'carrom', 'ludo'],
         required: true
     },
     score: { type: Number, default: 0 },

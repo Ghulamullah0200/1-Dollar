@@ -5,7 +5,7 @@ const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const Settings = require('../models/Settings');
 const { auth } = require('../middleware/auth');
-const { asyncHandler } = require('../utils/helpers');
+const { asyncHandler, emitToUser, emitToAdmin } = require('../utils/helpers');
 const logger = require('../utils/logger');
 
 // ═══════════════════════════════════════════════════
@@ -106,6 +106,11 @@ router.post('/register', asyncHandler(async (req, res) => {
                     body: `${username} registered using your link! They need to complete deposit for you to earn.`,
                     type: 'referral'
                 });
+                emitToUser(req.io, referrer._id, 'notification', {
+                    title: '👤 New Referral Signup!',
+                    body: `${username} registered using your link! They need to complete deposit for you to earn.`,
+                    type: 'referral'
+                });
             }
         }
     }
@@ -115,7 +120,7 @@ router.post('/register', asyncHandler(async (req, res) => {
 
     // Admin alert
     if (req.io) {
-        req.io.emit('admin:newUser', {
+        const newUserPayload = {
             title: '👤 New User Registered',
             body: `${username} just created an account${referrer ? ` (referred by ${referrer.username})` : ''}`,
             username,
@@ -123,7 +128,9 @@ router.post('/register', asyncHandler(async (req, res) => {
             userId: user._id,
             referredBy: referrer?.username || null,
             timestamp: new Date().toISOString()
-        });
+        };
+        req.io.emit('admin:newUser', newUserPayload);
+        emitToAdmin(req.io, 'admin:newUser', newUserPayload);
     }
 
     res.status(201).json({

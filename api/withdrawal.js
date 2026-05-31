@@ -4,7 +4,7 @@ const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const Settings = require('../models/Settings');
 const { auth } = require('../middleware/auth');
-const { asyncHandler } = require('../utils/helpers');
+const { asyncHandler, emitToAdmin } = require('../utils/helpers');
 const notificationService = require('../services/notificationService');
 
 // ═══════════════════════════════════════════════════
@@ -77,14 +77,16 @@ router.post('/', auth, asyncHandler(async (req, res) => {
 
     // Admin alert
     if (req.io) {
-        req.io.emit('admin:newWithdrawal', {
+        const withdrawPayload = {
             title: '📤 New Withdrawal Request',
             body: `${user.username} requested a $${withdrawAmount.toFixed(2)} withdrawal`,
             username: user.username,
             amount: withdrawAmount,
             withdrawalId: withdrawal._id,
             timestamp: new Date().toISOString()
-        });
+        };
+        req.io.emit('admin:newWithdrawal', withdrawPayload);
+        emitToAdmin(req.io, 'admin:newWithdrawal', withdrawPayload);
     }
 
     
@@ -169,14 +171,16 @@ router.post('/all', auth, asyncHandler(async (req, res) => {
 
     // Admin alert
     if (req.io) {
-        req.io.emit('admin:newWithdrawal', {
+        const fullWithdrawPayload = {
             title: '📤 Full Withdrawal Request',
             body: `${updated.username} requested full withdrawal of $${withdrawAmount.toFixed(2)}`,
             username: updated.username,
             amount: withdrawAmount,
             withdrawalId: withdrawal._id,
             timestamp: new Date().toISOString()
-        });
+        };
+        req.io.emit('admin:newWithdrawal', fullWithdrawPayload);
+        emitToAdmin(req.io, 'admin:newWithdrawal', fullWithdrawPayload);
     }
 
     res.json({ message: 'Full withdrawal submitted!', wallet: updated.wallet });
@@ -186,24 +190,45 @@ router.post('/all', auth, asyncHandler(async (req, res) => {
 // CANCEL WITHDRAWAL
 // ═══════════════════════════════════════════════════
 router.post('/:id/cancel', auth, asyncHandler(async (req, res) => {
-    const transaction = await Transaction.findOne({
+    // First confirm it belongs to this user and exists
+    const existing = await Transaction.findOne({
         _id: req.params.id,
         userId: req.userId,
-        type: 'withdrawal',
-        status: 'pending'
+        type: 'withdrawal'
     });
 
-    if (!transaction) return res.status(404).json({ message: 'Pending withdrawal not found' });
+    if (!existing) return res.status(404).json({ message: 'Withdrawal not found' });
 
+    if (existing.status !== 'pending') {
+        return res.status(400).json({
+            message: `Cannot cancel — withdrawal is already ${existing.status}.`
+        });
+    }
+
+    // Atomically flip status from 'pending' → 'rejected' only if still pending.
+    // If another request already changed it, findOneAndUpdate returns null — safe no-op.
+    const transaction = await Transaction.findOneAndUpdate(
+        { _id: req.params.id, userId: req.userId, type: 'withdrawal', status: 'pending' },
+        { $set: { status: 'rejected' } },
+        { new: true }
+    );
+
+    if (!transaction) {
+        return res.status(400).json({ message: 'Withdrawal could not be cancelled — it may have just been processed.' });
+    }
+
+    // Atomic refund only after confirmed status flip
     await User.findByIdAndUpdate(req.userId, {
         $inc: { 'wallet.balance': transaction.amount }
     });
 
-    transaction.status = 'rejected';
-    transaction.description += ' (Cancelled by user)';
-    await transaction.save();
+    // Append cancel note to description (safe post-flip update)
+    await Transaction.updateOne(
+        { _id: transaction._id },
+        { $set: { description: (transaction.description || '') + ' (Cancelled by user)' } }
+    );
 
-    const user = await User.findById(req.userId);
+    const user = await User.findById(req.userId).select('wallet').lean();
     res.json({ message: 'Withdrawal cancelled and refunded', wallet: user.wallet });
 }));
 
